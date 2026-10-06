@@ -1,0 +1,25 @@
+# Gives the sandbox internet access (curl, pip install, ...).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.egress.yml up -d
+#
+# READ THIS FIRST. With internet access, anyone who can talk to the bot can make requests from
+# your server's address: scanning, spam, attacks on third parties, and, unless you block it,
+# reaching your LAN, other containers and cloud metadata endpoints (169.254.169.254).
+# Before enabling it:
+#   * keep the sandbox on its own networks (this file does), so it still cannot see Ollama/SearXNG;
+#   * block private and link-local destinations for the `egress` network on the host, e.g. with
+#     iptables rules in the DOCKER-USER chain matching the bridge of this network:
+#       iptables -I DOCKER-USER -s <egress-subnet> -d 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16 -j DROP
+#   * consider a restrictive outbound allowlist (proxy) and bandwidth limits;
+#   * keep JANNYQ_RUN_RATE low.
+
+services:
+  sandbox:
+    environment:
+      JANNYQ_SANDBOX_NETWORK: "on"
+    networks:
+      - sandbox
+      - egress
+
+networks:
+  egress: {}

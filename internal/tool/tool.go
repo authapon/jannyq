@@ -30,6 +30,11 @@ type Tool interface {
 	Execute(ctx context.Context, cc CallContext, args []byte) (string, error)
 }
 
+// Hinter is implemented by tools that add guidance to the system prompt.
+type Hinter interface {
+	Hint() string
+}
+
 // Registry holds the enabled tools.
 type Registry struct {
 	tools map[string]Tool
@@ -63,6 +68,24 @@ func (r *Registry) Defs() []llm.ToolDef {
 		defs = append(defs, llm.ToolDef{Name: n, Description: t.Description(), Parameters: t.Parameters()})
 	}
 	return defs
+}
+
+// Hints returns the prompt guidance of all registered tools, in name order.
+func (r *Registry) Hints() []string {
+	names := make([]string, 0, len(r.tools))
+	for n := range r.tools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, n := range names {
+		if h, ok := r.tools[n].(Hinter); ok {
+			if hint := h.Hint(); hint != "" {
+				out = append(out, hint)
+			}
+		}
+	}
+	return out
 }
 
 // Truncate shortens s to at most max runes and notes how much was dropped.

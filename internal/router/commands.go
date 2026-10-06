@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/authapon/jannyq/internal/channel"
+	"github.com/authapon/jannyq/internal/sandbox"
 	"github.com/authapon/jannyq/internal/session"
 )
 
@@ -31,6 +32,12 @@ func (r *Router) command(ctx context.Context, in channel.Incoming, cmd string) b
 		err := r.sessions.With(ctx, in.Channel, in.ChatID, func(s *session.Session) error {
 			return s.Reset(ctx)
 		})
+		if err == nil && r.resetWorkspace != nil {
+			ws := sandbox.WorkspaceID(in.Channel + ":" + in.ChatID)
+			if werr := r.resetWorkspace(ctx, ws); werr != nil {
+				r.log.Warn("could not delete the sandbox workspace", "channel", in.Channel, "chat", in.ChatID, "err", werr)
+			}
+		}
 		r.say(ctx, in, r.commandResult(err, "reset_done", in))
 	case "compact":
 		changed := false

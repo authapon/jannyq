@@ -14,6 +14,7 @@ import (
 	"github.com/authapon/jannyq/internal/agent"
 	"github.com/authapon/jannyq/internal/channel"
 	"github.com/authapon/jannyq/internal/i18n"
+	"github.com/authapon/jannyq/internal/ratelimit"
 	"github.com/authapon/jannyq/internal/session"
 )
 
@@ -42,7 +43,9 @@ type Router struct {
 
 	allowed map[string]bool
 	sem     chan struct{}
-	limiter *rateLimiter
+	limiter *ratelimit.Limiter
+
+	resetWorkspace func(ctx context.Context, workspace string) error
 }
 
 // New creates a Router.
@@ -63,7 +66,7 @@ func New(cfg Config, sessions *session.Manager, a *agent.Agent, tr *i18n.Transla
 		cfg: cfg, sessions: sessions, agent: a, tr: tr, log: log,
 		allowed: map[string]bool{},
 		sem:     make(chan struct{}, cfg.MaxConcurrent),
-		limiter: newRateLimiter(cfg.RateLimit, time.Minute),
+		limiter: ratelimit.New(cfg.RateLimit, time.Minute),
 	}
 	for _, u := range cfg.AllowedUsers {
 		if u = strings.TrimSpace(u); u != "" {
@@ -71,6 +74,12 @@ func New(cfg Config, sessions *session.Manager, a *agent.Agent, tr *i18n.Transla
 		}
 	}
 	return r
+}
+
+// SetWorkspaceReset registers a function that deletes a chat's command
+// sandbox workspace; it is called by /reset.
+func (r *Router) SetWorkspaceReset(fn func(ctx context.Context, workspace string) error) {
+	r.resetWorkspace = fn
 }
 
 // Handle processes one incoming message. It is the channel.Sink.

@@ -1,11 +1,18 @@
-# Example stack: jannyq + SearXNG + Ollama.
+# Example stack: jannyq + sandbox + SearXNG + Ollama.
 #
-#   cp .env.example .env        # set JANNYQ_TELEGRAM_TOKEN, adjust the model
+#   cp .env.example .env        # set JANNYQ_TELEGRAM_TOKEN and JANNYQ_SANDBOX_TOKEN, adjust the model
 #   docker compose up -d --build
 #   docker compose logs -f jannyq
 #
 # Using an OpenAI-compatible API instead of Ollama? Set JANNYQ_LLM_PROVIDER=openai,
 # JANNYQ_LLM_BASE_URL and JANNYQ_LLM_API_KEY in .env, and drop the ollama services.
+#
+# Don't want the model to run commands? Set JANNYQ_RUN_COMMAND=off and remove the
+# sandbox service together with jannyq's depends_on entry for it.
+#
+# Networks: jannyq talks to the sandbox over `sandbox`, an internal network without internet
+# access. The sandbox is on no other network, so commands cannot reach Ollama, SearXNG or the
+# bot's HTTP port. To give commands internet access see docker-compose.egress.yml.
 
 services:
   jannyq:
@@ -20,13 +27,22 @@ services:
       JANNYQ_LLM_PROVIDER: ${JANNYQ_LLM_PROVIDER:-ollama}
       JANNYQ_LLM_BASE_URL: ${JANNYQ_LLM_BASE_URL:-http://ollama:11434}
       JANNYQ_SEARXNG_URL: ${JANNYQ_SEARXNG_URL:-http://searxng:8080}
+      JANNYQ_RUN_COMMAND: ${JANNYQ_RUN_COMMAND:-sandbox}
+      JANNYQ_SANDBOX_URL: http://sandbox:9090
+      JANNYQ_SKILLS_DIR: /skills
     volumes:
       - jannyq-data:/data
+      - ./skills:/skills:ro
     depends_on:
       searxng:
         condition: service_started
       ollama:
         condition: service_started
+      sandbox:
+        condition: service_started
+    networks:
+      - default
+      - sandbox
     # Webhook-based channels (LINE, Messenger, WhatsApp, webbot) arrive in later
     # phases and need a public HTTPS URL. Telegram and Discord do not.
     # ports:
@@ -38,6 +54,48 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+
+  # Runs the shell commands the model asks for. Treat everything in here as hostile:
+  # it has no secrets, no internet, a read-only root filesystem, hard resource limits,
+  # and every chat's commands run as a separate unprivileged user in a private directory.
+  sandbox:
+    build:
+      context: .
+      target: sandbox
+      args:
+        VERSION: ${JANNYQ_VERSION:-dev}
+    image: jannyq-sandbox:latest
+    restart: unless-stopped
+    environment:
+      # Shared secret with jannyq. Generate one with: openssl rand -hex 32
+      JANNYQ_SANDBOX_TOKEN: ${JANNYQ_SANDBOX_TOKEN:?set JANNYQ_SANDBOX_TOKEN in .env (openssl rand -hex 32)}
+      # Tells the model whether commands have internet access; the network itself is set below.
+      JANNYQ_SANDBOX_NETWORK: ${JANNYQ_SANDBOX_NETWORK:-off}
+    volumes:
+      - sandbox-work:/work
+      - ./skills:/skills:ro
+    networks:
+      - sandbox
+    # Root is only used to start commands as their per-chat user; everything else is dropped.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    pids_limit: 512
+    mem_limit: 1g
+    cpus: 1.0
+    # For stronger isolation install gVisor and uncomment:
+    # runtime: runsc
 
   searxng:
     image: searxng/searxng:latest
@@ -76,6 +134,11 @@ services:
     command: []
     env_file: .env
 
+networks:
+  sandbox:
+    internal: true
+
 volumes:
   jannyq-data:
+  sandbox-work:
   ollama-models:

@@ -52,6 +52,16 @@ type Config struct {
 	FetchTimeout      time.Duration
 	FetchAllowPrivate bool
 
+	// Command execution and skills
+	RunCommand        string // off, sandbox or host
+	SandboxURL        string
+	SandboxToken      string
+	RunRate           int // commands per user per minute
+	RunHostUnsafe     bool
+	AuditLog          string
+	SkillsDir         string
+	SkillsSandboxPath string
+
 	// Channels
 	TelegramToken string
 	TelegramAPI   string
@@ -70,20 +80,21 @@ type Config struct {
 var ErrHelp = flag.ErrHelp
 
 type loader struct {
-	fs   *flag.FlagSet
-	env  func(string) string
-	errs []error
+	fs     *flag.FlagSet
+	env    func(string) string
+	prefix string // environment variable prefix, e.g. JANNYQ_
+	errs   []error
 }
 
-func envName(flagName string) string {
-	return "JANNYQ_" + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
+func (l *loader) envName(flagName string) string {
+	return l.prefix + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
 }
 
 // raw returns the environment value for a flag, or "" if unset.
-func (l *loader) raw(name string) string { return strings.TrimSpace(l.env(envName(name))) }
+func (l *loader) raw(name string) string { return strings.TrimSpace(l.env(l.envName(name))) }
 
 func (l *loader) usage(name, usage string) string {
-	return usage + " [" + envName(name) + "]"
+	return usage + " [" + l.envName(name) + "]"
 }
 
 func (l *loader) str(p *string, name, def, usage string) {
@@ -100,20 +111,20 @@ func (l *loader) secret(p *string, name, usage string) {
 		if path := l.raw(name + "_file"); path != "" {
 			b, err := os.ReadFile(path)
 			if err != nil {
-				l.errs = append(l.errs, fmt.Errorf("%s_FILE: %w", envName(name), err))
+				l.errs = append(l.errs, fmt.Errorf("%s_FILE: %w", l.envName(name), err))
 			} else {
 				def = strings.TrimSpace(string(b))
 			}
 		}
 	}
-	l.fs.StringVar(p, name, def, l.usage(name, usage)+" (or "+envName(name)+"_FILE)")
+	l.fs.StringVar(p, name, def, l.usage(name, usage)+" (or "+l.envName(name)+"_FILE)")
 }
 
 func (l *loader) integer(p *int, name string, def int, usage string) {
 	if v := l.raw(name); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			l.errs = append(l.errs, fmt.Errorf("%s: %q is not an integer", envName(name), v))
+			l.errs = append(l.errs, fmt.Errorf("%s: %q is not an integer", l.envName(name), v))
 		} else {
 			def = n
 		}
@@ -125,7 +136,7 @@ func (l *loader) int64v(p *int64, name string, def int64, usage string) {
 	if v := l.raw(name); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
-			l.errs = append(l.errs, fmt.Errorf("%s: %q is not an integer", envName(name), v))
+			l.errs = append(l.errs, fmt.Errorf("%s: %q is not an integer", l.envName(name), v))
 		} else {
 			def = n
 		}
@@ -137,7 +148,7 @@ func (l *loader) float(p *float64, name string, def float64, usage string) {
 	if v := l.raw(name); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
-			l.errs = append(l.errs, fmt.Errorf("%s: %q is not a number", envName(name), v))
+			l.errs = append(l.errs, fmt.Errorf("%s: %q is not a number", l.envName(name), v))
 		} else {
 			def = f
 		}
@@ -149,7 +160,7 @@ func (l *loader) boolean(p *bool, name string, def bool, usage string) {
 	if v := l.raw(name); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
-			l.errs = append(l.errs, fmt.Errorf("%s: %q is not a boolean", envName(name), v))
+			l.errs = append(l.errs, fmt.Errorf("%s: %q is not a boolean", l.envName(name), v))
 		} else {
 			def = b
 		}
@@ -161,7 +172,7 @@ func (l *loader) duration(p *time.Duration, name string, def time.Duration, usag
 	if v := l.raw(name); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			l.errs = append(l.errs, fmt.Errorf("%s: %q is not a duration (e.g. 30s, 5m)", envName(name), v))
+			l.errs = append(l.errs, fmt.Errorf("%s: %q is not a duration (e.g. 30s, 5m)", l.envName(name), v))
 		} else {
 			def = d
 		}
@@ -174,7 +185,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	c := &Config{}
 	fs := flag.NewFlagSet("jannyq", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	l := &loader{fs: fs, env: env}
+	l := &loader{fs: fs, env: env, prefix: "JANNYQ_"}
 
 	var allowed, systemPromptFile string
 
@@ -212,6 +223,16 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.duration(&c.FetchTimeout, "fetch-timeout", 25*time.Second, "web_fetch timeout")
 	l.boolean(&c.FetchAllowPrivate, "fetch-allow-private", false, "let web_fetch reach private/loopback addresses (disables SSRF protection!)")
 
+	// Command execution and skills
+	l.str(&c.RunCommand, "run-command", "off", "run_command tool: off, sandbox (recommended) or host (unsafe)")
+	l.str(&c.SandboxURL, "sandbox-url", "", "URL of the sandbox executor, e.g. http://sandbox:9090 (run-command=sandbox)")
+	l.secret(&c.SandboxToken, "sandbox-token", "shared secret for the sandbox executor")
+	l.integer(&c.RunRate, "run-rate", 10, "run_command calls per user per minute; 0 = unlimited")
+	l.boolean(&c.RunHostUnsafe, "run-host-unsafe", false, "confirm that run-command=host runs untrusted commands directly on this machine")
+	l.str(&c.AuditLog, "audit-log", "", "command audit log file (default <data-dir>/audit/commands.jsonl)")
+	l.str(&c.SkillsDir, "skills-dir", "", "directory of skills (folders with SKILL.md); empty disables skills")
+	l.str(&c.SkillsSandboxPath, "skills-sandbox-path", "/skills", "where the skills directory is mounted inside the sandbox; empty if it is not")
+
 	// Channels
 	l.secret(&c.TelegramToken, "telegram-token", "Telegram bot token; enables the Telegram channel")
 	l.str(&c.TelegramAPI, "telegram-api", "https://api.telegram.org", "Telegram Bot API base URL")
@@ -225,23 +246,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.duration(&c.RequestTimeout, "request-timeout", 10*time.Minute, "maximum time to answer one message")
 	l.integer(&c.MaxOpenSessions, "max-open-sessions", 64, "chat databases kept open at once")
 
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: jannyq [flags]")
-		fmt.Fprintln(stderr, "\nEvery flag can also be set with the environment variable shown in brackets.")
-		fmt.Fprintln(stderr, "Flags override the environment. Prefer environment variables for secrets.")
-		fmt.Fprintln(stderr)
-		var names []string
-		fs.VisitAll(func(f *flag.Flag) { names = append(names, f.Name) })
-		sort.Strings(names)
-		for _, n := range names {
-			f := fs.Lookup(n)
-			def := ""
-			if f.DefValue != "" && f.DefValue != "false" && f.DefValue != "0" {
-				def = " (default " + f.DefValue + ")"
-			}
-			fmt.Fprintf(stderr, "  --%s\n        %s%s\n", f.Name, f.Usage, def)
-		}
-	}
+	fs.Usage = usageFunc(fs, stderr, "jannyq [flags]")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -313,6 +318,25 @@ func (c *Config) validate() error {
 	if c.MaxConcurrent < 1 {
 		bad("--max-concurrent must be at least 1")
 	}
+	switch c.RunCommand {
+	case "off":
+	case "sandbox":
+		if c.SandboxURL == "" {
+			bad("--sandbox-url is required with --run-command=sandbox")
+		}
+		if len(c.SandboxToken) < 16 {
+			bad("--sandbox-token (JANNYQ_SANDBOX_TOKEN) must be set to a secret of at least 16 characters")
+		}
+	case "host":
+		if !c.RunHostUnsafe {
+			bad("--run-command=host runs untrusted commands directly on this machine; add --run-host-unsafe to confirm, or use sandbox")
+		}
+	default:
+		bad("--run-command must be off, sandbox or host")
+	}
+	if c.RunRate < 0 {
+		bad("--run-rate must not be negative")
+	}
 	if c.RateLimit < 0 {
 		bad("--rate-limit must not be negative")
 	}
@@ -322,4 +346,26 @@ func (c *Config) validate() error {
 		bad("--log-level must be debug, info, warn or error")
 	}
 	return errors.Join(errs...)
+}
+
+// usageFunc prints every flag with its environment variable (which is part
+// of each flag's usage text).
+func usageFunc(fs *flag.FlagSet, w io.Writer, synopsis string) func() {
+	return func() {
+		fmt.Fprintln(w, "Usage:", synopsis)
+		fmt.Fprintln(w, "\nEvery flag can also be set with the environment variable shown in brackets.")
+		fmt.Fprintln(w, "Flags override the environment. Prefer environment variables for secrets.")
+		fmt.Fprintln(w)
+		var names []string
+		fs.VisitAll(func(f *flag.Flag) { names = append(names, f.Name) })
+		sort.Strings(names)
+		for _, n := range names {
+			f := fs.Lookup(n)
+			def := ""
+			if f.DefValue != "" && f.DefValue != "false" && f.DefValue != "0" {
+				def = " (default " + f.DefValue + ")"
+			}
+			fmt.Fprintf(w, "  --%s\n        %s%s\n", f.Name, f.Usage, def)
+		}
+	}
 }

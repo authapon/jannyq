@@ -16,6 +16,7 @@ import (
 
 	"github.com/authapon/jannyq/internal/llm"
 	"github.com/authapon/jannyq/internal/session"
+	"github.com/authapon/jannyq/internal/skill"
 	"github.com/authapon/jannyq/internal/tool"
 )
 
@@ -42,6 +43,15 @@ type Config struct {
 	CompactKeep  int     // recent messages kept verbatim
 
 	ToolMaxOutput int // max characters of one tool result kept in history
+
+	// Skills, when set, lists skills in the system prompt (the load_skill
+	// tool must be registered for the model to use them).
+	Skills SkillCatalog
+}
+
+// SkillCatalog provides the skill list shown to the model.
+type SkillCatalog interface {
+	Summaries() []skill.Summary
 }
 
 // Input is one incoming user message.

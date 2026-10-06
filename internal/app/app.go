@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/authapon/jannyq/internal/agent"
 	"github.com/authapon/jannyq/internal/channel"
@@ -20,9 +21,11 @@ import (
 	"github.com/authapon/jannyq/internal/config"
 	"github.com/authapon/jannyq/internal/i18n"
 	"github.com/authapon/jannyq/internal/llm"
+	"github.com/authapon/jannyq/internal/ratelimit"
 	"github.com/authapon/jannyq/internal/router"
 	"github.com/authapon/jannyq/internal/server"
 	"github.com/authapon/jannyq/internal/session"
+	"github.com/authapon/jannyq/internal/skill"
 	"github.com/authapon/jannyq/internal/tool"
 )
 
@@ -80,12 +83,41 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		log.Warn("web_fetch may reach private addresses (--fetch-allow-private)")
 	}
 
+	runner, err := newCommandRunner(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	if runner != nil {
+		defer runner.audit.Close()
+		skillsPath := ""
+		if cfg.SkillsDir != "" && cfg.RunCommand == "sandbox" {
+			skillsPath = cfg.SkillsSandboxPath
+		}
+		tools.Register(&tool.RunCommand{
+			Runner:     runner.runner,
+			Info:       runner.info,
+			Limiter:    ratelimit.New(cfg.RunRate, time.Minute),
+			Audit:      runner.audit,
+			Log:        log,
+			SkillsPath: skillsPath,
+		})
+	}
+	var skills *skill.Store
+	if cfg.SkillsDir != "" {
+		skills, err = skill.NewStore(cfg.SkillsDir, cfg.SkillsSandboxPath, log)
+		if err != nil {
+			return fmt.Errorf("skills: %w", err)
+		}
+		tools.Register(&tool.LoadSkill{Store: skills})
+		log.Info("skills loaded", "dir", cfg.SkillsDir, "count", len(skills.Summaries()))
+	}
+
 	var temp *float64
 	if cfg.Temperature >= 0 {
 		t := cfg.Temperature
 		temp = &t
 	}
-	ag := agent.New(agent.Config{
+	acfg := agent.Config{
 		Model:         cfg.LLMModel,
 		ContextSize:   cfg.ContextSize,
 		Temperature:   temp,
@@ -98,7 +130,11 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		CompactRatio:  cfg.CompactRatio,
 		CompactKeep:   cfg.CompactKeep,
 		ToolMaxOutput: cfg.ToolMaxOutput,
-	}, provider, tools, log)
+	}
+	if skills != nil {
+		acfg.Skills = skills
+	}
+	ag := agent.New(acfg, provider, tools, log)
 
 	sessionsDir := filepath.Join(cfg.DataDir, "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o750); err != nil {
@@ -115,6 +151,9 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		MaxConcurrent:  cfg.MaxConcurrent,
 		RequestTimeout: cfg.RequestTimeout,
 	}, sessions, ag, tr, log)
+	if runner != nil {
+		rt.SetWorkspaceReset(runner.runner.Reset)
+	}
 
 	var channels []channel.Channel
 	if cfg.TelegramToken != "" {
@@ -133,7 +172,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	log.Info("jannyq starting",
 		"version", version, "model", cfg.LLMModel, "provider", cfg.LLMProvider,
 		"context_size", cfg.ContextSize, "lang", cfg.Lang,
-		"tools", tools.Len(), "channels", len(channels), "data_dir", cfg.DataDir)
+		"tools", tools.Len(), "run_command", cfg.RunCommand, "channels", len(channels), "data_dir", cfg.DataDir)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

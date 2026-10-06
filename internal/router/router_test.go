@@ -14,6 +14,7 @@ import (
 	"github.com/authapon/jannyq/internal/channel"
 	"github.com/authapon/jannyq/internal/i18n"
 	"github.com/authapon/jannyq/internal/llm"
+	"github.com/authapon/jannyq/internal/sandbox"
 	"github.com/authapon/jannyq/internal/session"
 )
 
@@ -158,25 +159,6 @@ func TestRateLimit(t *testing.T) {
 	}
 }
 
-func TestRateLimiterWindow(t *testing.T) {
-	now := time.Unix(1000, 0)
-	l := newRateLimiter(2, time.Minute)
-	l.now = func() time.Time { return now }
-	if !l.Allow("a") || !l.Allow("a") || l.Allow("a") {
-		t.Fatal("limit not enforced")
-	}
-	if !l.Allow("b") {
-		t.Error("limit must be per key")
-	}
-	now = now.Add(61 * time.Second)
-	if !l.Allow("a") {
-		t.Error("window should have slid")
-	}
-	if !newRateLimiter(0, time.Minute).Allow("x") {
-		t.Error("0 means unlimited")
-	}
-}
-
 func TestCommands(t *testing.T) {
 	f := &fakeLLM{}
 	r := newRouter(t, f, Config{})
@@ -289,5 +271,27 @@ func TestDifferentChatsAreIndependent(t *testing.T) {
 	defer f.mu.Unlock()
 	if n := len(f.requests[1].Messages); n != 2 {
 		t.Errorf("chat 2 request has %d messages, want 2 (no leakage from chat 1)", n)
+	}
+}
+
+func TestResetAlsoDeletesTheSandboxWorkspace(t *testing.T) {
+	r := newRouter(t, &fakeLLM{}, Config{})
+	var deleted []string
+	r.SetWorkspaceReset(func(_ context.Context, ws string) error { deleted = append(deleted, ws); return nil })
+	rec := &recorder{}
+	r.Handle(ctx, msg(rec, "hello"))
+	r.Handle(ctx, msg(rec, "/reset"))
+	if len(deleted) != 1 || deleted[0] != sandbox.WorkspaceID("test:c1") {
+		t.Errorf("deleted = %v", deleted)
+	}
+	if got := rec.all(); !strings.Contains(got[len(got)-1], "cleared") {
+		t.Errorf("reply = %q", got[len(got)-1])
+	}
+
+	// a failing workspace delete must not break /reset
+	r.SetWorkspaceReset(func(context.Context, string) error { return errors.New("sandbox down") })
+	r.Handle(ctx, msg(rec, "/reset"))
+	if got := rec.all(); !strings.Contains(got[len(got)-1], "cleared") {
+		t.Errorf("reply after failed workspace reset = %q", got[len(got)-1])
 	}
 }

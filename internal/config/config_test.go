@@ -133,3 +133,88 @@ func TestHelp(t *testing.T) {
 		}
 	}
 }
+
+func TestRunCommandSettings(t *testing.T) {
+	base := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	with := func(extra map[string]string) map[string]string {
+		e := map[string]string{}
+		for k, v := range base {
+			e[k] = v
+		}
+		for k, v := range extra {
+			e[k] = v
+		}
+		return e
+	}
+	c, err := load(t, nil, base)
+	if err != nil || c.RunCommand != "off" || c.RunRate != 10 || c.SkillsSandboxPath != "/skills" {
+		t.Fatalf("defaults: %+v err=%v", c, err)
+	}
+
+	tok := "0123456789abcdef0123"
+	c, err = load(t, nil, with(map[string]string{"JANNYQ_RUN_COMMAND": "sandbox", "JANNYQ_SANDBOX_URL": "http://sandbox:9090", "JANNYQ_SANDBOX_TOKEN": tok}))
+	if err != nil || c.SandboxURL != "http://sandbox:9090" || c.SandboxToken != tok {
+		t.Errorf("sandbox mode: %+v err=%v", c, err)
+	}
+
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		args []string
+		want string
+	}{
+		"sandbox needs url":   {map[string]string{"JANNYQ_RUN_COMMAND": "sandbox", "JANNYQ_SANDBOX_TOKEN": tok}, nil, "sandbox-url"},
+		"sandbox needs token": {map[string]string{"JANNYQ_RUN_COMMAND": "sandbox", "JANNYQ_SANDBOX_URL": "http://s"}, nil, "SANDBOX_TOKEN"},
+		"weak token":          {map[string]string{"JANNYQ_RUN_COMMAND": "sandbox", "JANNYQ_SANDBOX_URL": "http://s", "JANNYQ_SANDBOX_TOKEN": "short"}, nil, "16 characters"},
+		"host needs ack":      {map[string]string{"JANNYQ_RUN_COMMAND": "host"}, nil, "run-host-unsafe"},
+		"unknown mode":        {nil, []string{"--run-command=docker"}, "run-command"},
+		"negative rate":       {nil, []string{"--run-rate=-1"}, "run-rate"},
+	} {
+		if _, err := load(t, tc.args, with(tc.env)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want mention of %q", name, err, tc.want)
+		}
+	}
+	if c, err := load(t, []string{"--run-command=host", "--run-host-unsafe"}, base); err != nil || c.RunCommand != "host" {
+		t.Errorf("acknowledged host mode: %+v err=%v", c, err)
+	}
+}
+
+func TestLoadSandbox(t *testing.T) {
+	tok := "0123456789abcdef0123"
+	c, err := LoadSandbox(nil, env(map[string]string{"JANNYQ_SANDBOX_TOKEN": tok}), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ":9090" || c.WorkDir != "/work" || c.UIDBase != 20000 || c.UIDCount != 40000 || c.MaxTimeout != 120*time.Second ||
+		c.Network != "off" || c.QuotaMB != 256 || c.AllowRoot {
+		t.Errorf("defaults: %+v", c)
+	}
+
+	c, err = LoadSandbox([]string{"--max-timeout=45s", "--network=on", "--quota-mb", "10"},
+		env(map[string]string{"JANNYQ_SANDBOX_TOKEN": tok, "JANNYQ_SANDBOX_WORKDIR": "/data/w", "JANNYQ_SANDBOX_MAX_TIMEOUT": "10s"}), io.Discard)
+	if err != nil || c.MaxTimeout != 45*time.Second || c.Network != "on" || c.QuotaMB != 10 || c.WorkDir != "/data/w" {
+		t.Errorf("overrides: %+v err=%v", c, err)
+	}
+
+	f := filepath.Join(t.TempDir(), "tok")
+	_ = os.WriteFile(f, []byte(tok+"\n"), 0o600)
+	if c, err := LoadSandbox(nil, env(map[string]string{"JANNYQ_SANDBOX_TOKEN_FILE": f}), io.Discard); err != nil || c.Token != tok {
+		t.Errorf("token file: %+v err=%v", c, err)
+	}
+
+	for name, args := range map[string][]string{
+		"default > max": {"--default-timeout=5m"},
+		"bad network":   {"--network=maybe"},
+		"zero quota":    {"--quota-mb=0"},
+		"low uid base":  {"--uid-base=0"},
+	} {
+		if _, err := LoadSandbox(args, env(map[string]string{"JANNYQ_SANDBOX_TOKEN": tok}), io.Discard); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if _, err := LoadSandbox(nil, env(nil), io.Discard); err == nil || !strings.Contains(err.Error(), "TOKEN") {
+		t.Errorf("missing token: %v", err)
+	}
+	if _, err := LoadSandbox(nil, env(map[string]string{"JANNYQ_SANDBOX_TOKEN": "short"}), io.Discard); err == nil {
+		t.Error("short token accepted")
+	}
+}
