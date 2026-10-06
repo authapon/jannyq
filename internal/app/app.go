@@ -129,7 +129,12 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		t := cfg.Temperature
 		temp = &t
 	}
+	loc, err := cfg.Location()
+	if err != nil {
+		return err
+	}
 	acfg := agent.Config{
+		Location:      loc,
 		Model:         cfg.LLMModel,
 		ContextSize:   cfg.ContextSize,
 		Temperature:   temp,
@@ -159,6 +164,8 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	rt := router.New(router.Config{
 		AllowedUsers:   cfg.AllowedUsers,
 		GroupReply:     cfg.GroupReply,
+		GroupContext:   cfg.GroupContext,
+		CompactAfter:   cfg.CompactAfter,
 		RateLimit:      cfg.RateLimit,
 		MaxConcurrent:  cfg.MaxConcurrent,
 		RequestTimeout: cfg.RequestTimeout,
@@ -225,7 +232,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 
 	log.Info("jannyq starting",
 		"version", version, "model", cfg.LLMModel, "provider", cfg.LLMProvider,
-		"context_size", cfg.ContextSize, "lang", cfg.Lang,
+		"context_size", cfg.ContextSize, "lang", cfg.Lang, "timezone", loc.String(), "group_context", cfg.GroupContext,
 		"tools", tools.Len(), "run_command", cfg.RunCommand, "channels", len(channels), "data_dir", cfg.DataDir)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -272,6 +279,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	case <-runCtx.Done():
 	}
 	wg.Wait()
+	rt.Wait()
 	if runErr == nil {
 		select {
 		case runErr = <-errc:

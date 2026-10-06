@@ -55,7 +55,7 @@ func TestCompactByMessageCount(t *testing.T) {
 		t.Fatalf("summariser calls = %d", len(seen))
 	}
 	prompt := seen[0].Messages[1].Content
-	for _, want := range []string{"User: question 1", "Assistant: answer 5", "(none yet)"} {
+	for _, want := range []string{"question 1", "Assistant: answer 5", "(none yet)"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("summariser prompt missing %q:\n%s", want, prompt)
 		}

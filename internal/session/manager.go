@@ -104,9 +104,10 @@ func (m *Manager) Exists(channel, chatID string) bool {
 	return err == nil
 }
 
-// Peek runs fn with read access to the chat's session without waiting for a
-// running request or counting towards the queue limit. fn may only call
-// read-only methods (Recent, Messages, Summary, Count).
+// Peek runs fn with access to the chat's session without waiting for a
+// running request or counting towards the queue limit. fn may only use
+// methods that are safe to call alongside a running request: reads (Recent,
+// Messages, Summary, Count) and AppendEntries.
 func (m *Manager) Peek(channel, chatID string, fn func(*Session) error) error {
 	key := channel + "\x00" + chatID
 	m.mu.Lock()
@@ -128,6 +129,12 @@ func (m *Manager) Peek(channel, chatID string, fn func(*Session) error) error {
 		return err
 	}
 	return fn(s)
+}
+
+// Record is Peek under the name used when the point is to write: storing
+// messages of a group conversation that nobody asked the bot to answer.
+func (m *Manager) Record(channel, chatID string, fn func(*Session) error) error {
+	return m.Peek(channel, chatID, fn)
 }
 
 func (m *Manager) release(e *entry) {

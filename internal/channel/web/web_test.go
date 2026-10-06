@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -755,5 +757,38 @@ func TestNewNeedsAStrongSecret(t *testing.T) {
 	srv := server.New(server.Options{Addr: ":0"})
 	if _, err := New(Config{Secret: []byte("short")}, srv, nil); err == nil {
 		t.Error("a short secret was accepted")
+	}
+}
+
+func TestMessagesFromOneVisitorAreAcceptedInTheOrderTheyWereSent(t *testing.T) {
+	h := newHarness(t, nil)
+	var mu sync.Mutex
+	var order []string
+	h.reply = nil
+	// replace the harness sink behaviour: uneven delay before accepting
+	h.ch.mu.Lock()
+	h.ch.sink = func(ctx context.Context, in channel.Incoming) {
+		n, _ := strconv.Atoi(strings.TrimPrefix(in.Text, "m"))
+		time.Sleep(time.Duration((n*13)%7) * time.Millisecond)
+		mu.Lock()
+		order = append(order, in.Text)
+		mu.Unlock()
+		in.Accepted()
+		time.Sleep(3 * time.Millisecond)
+	}
+	h.ch.mu.Unlock()
+	h.start()
+	for i := 1; i <= 25; i++ {
+		if code, _ := h.json("POST", "/api/send", fmt.Sprintf(`{"text":"m%d"}`, i), nil); code != 202 {
+			t.Fatalf("send %d: %d", i, code)
+		}
+	}
+	waitUntil(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(order) == 25 })
+	mu.Lock()
+	defer mu.Unlock()
+	for i, got := range order {
+		if got != fmt.Sprintf("m%d", i+1) {
+			t.Fatalf("accepted order = %v", order)
+		}
 	}
 }

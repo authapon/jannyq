@@ -24,8 +24,25 @@ const (
 	GroupReplyAll     = "all"     // every message in groups
 )
 
+// What the bot keeps of group conversations.
+const (
+	GroupContextAll       = "all"       // every message, so the model knows who said what
+	GroupContextAddressed = "addressed" // only messages addressed to the bot
+)
+
+const (
+	maxRecordRunes   = 4000 // longest group message kept when it was not addressed to the bot
+	recordsPerMinute = 300  // per chat; beyond it, unaddressed messages are not kept
+	compactRetry     = 5 * time.Minute
+)
+
 // Config controls routing behaviour.
 type Config struct {
+	// GroupContext is GroupContextAll (default) or GroupContextAddressed.
+	GroupContext string
+	// CompactAfter is the message count above which a chat that only collects
+	// messages is summarised in the background; 0 disables that.
+	CompactAfter   int
 	AllowedUsers   []string // "id" or "channel:id"; empty allows everyone
 	GroupReply     string
 	RateLimit      int // messages per user per minute; 0 = unlimited
@@ -46,6 +63,11 @@ type Router struct {
 	limiter *ratelimit.Limiter
 
 	resetWorkspace func(ctx context.Context, workspace string) error
+
+	recordLimiter *ratelimit.Limiter
+	wg            sync.WaitGroup
+	mu            sync.Mutex
+	compactAt     map[string]time.Time
 }
 
 // New creates a Router.
@@ -59,6 +81,9 @@ func New(cfg Config, sessions *session.Manager, a *agent.Agent, tr *i18n.Transla
 	if cfg.GroupReply == "" {
 		cfg.GroupReply = GroupReplyMention
 	}
+	if cfg.GroupContext == "" {
+		cfg.GroupContext = GroupContextAll
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -67,6 +92,9 @@ func New(cfg Config, sessions *session.Manager, a *agent.Agent, tr *i18n.Transla
 		allowed: map[string]bool{},
 		sem:     make(chan struct{}, cfg.MaxConcurrent),
 		limiter: ratelimit.New(cfg.RateLimit, time.Minute),
+
+		recordLimiter: ratelimit.New(recordsPerMinute, time.Minute),
+		compactAt:     map[string]time.Time{},
 	}
 	for _, u := range cfg.AllowedUsers {
 		if u = strings.TrimSpace(u); u != "" {
@@ -82,43 +110,85 @@ func (r *Router) SetWorkspaceReset(fn func(ctx context.Context, workspace string
 	r.resetWorkspace = fn
 }
 
-// Handle processes one incoming message. It is the channel.Sink.
+// Handle processes one incoming message. It is the channel.Sink: it returns
+// once the message has been fully handled, but calls in.Accepted as soon as the
+// message has been stored (or turned away), before anything slow happens.
 func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
+	var once sync.Once
+	accept := func() {
+		once.Do(func() {
+			if in.Accepted != nil {
+				in.Accepted()
+			}
+		})
+	}
+	defer accept()
+
 	if in.Responder == nil {
 		return
 	}
+	if in.ReceivedAt.IsZero() {
+		in.ReceivedAt = time.Now()
+	}
 	if in.IsGroup && !in.Addressed && r.cfg.GroupReply != GroupReplyAll {
+		r.record(ctx, in) // not for us, but part of the conversation
 		return
 	}
 	if !r.isAllowed(in) {
+		accept()
 		r.log.Info("message from user that is not allowed", "channel", in.Channel, "user", in.UserID)
 		r.say(ctx, in, r.tr.T("not_allowed"))
 		return
 	}
 	if !r.limiter.Allow(in.Channel + ":" + in.UserID) {
+		accept()
 		r.say(ctx, in, r.tr.T("rate_limited"))
 		return
 	}
 
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
+		accept()
 		if in.HasAttachment {
 			r.say(ctx, in, r.tr.T("unsupported_attachment"))
 		}
 		return
 	}
 
-	stopTyping := r.keepTyping(ctx, in.Responder)
-	defer stopTyping()
-
 	if cmd, ok := parseCommand(text); ok {
-		if r.command(ctx, in, cmd) {
+		// A reset forgets what was said up to now, not what is said while it waits
+		// for its turn: note where "now" is before letting later messages in.
+		var upTo int64
+		if cmd == "reset" {
+			_ = r.sessions.Record(in.Channel, in.ChatID, func(s *session.Session) error {
+				upTo, _ = s.LastID(ctx)
+				return nil
+			})
+		}
+		accept()
+		stopTyping := r.keepTyping(ctx, in.Responder)
+		defer stopTyping()
+		if r.command(ctx, in, cmd, upTo) {
 			return
 		}
 	}
 
-	err := r.sessions.With(ctx, in.Channel, in.ChatID, func(s *session.Session) error {
-		r.respond(ctx, s, in, text)
+	// Store the message now, in the order it arrived, without waiting for a
+	// request of this chat that may still be running.
+	id, err := r.store(ctx, in, text)
+	accept()
+	if err != nil {
+		if ctx.Err() == nil {
+			r.log.Error("could not store a message", "channel", in.Channel, "chat", in.ChatID, "err", err)
+			r.say(ctx, in, r.tr.T("error_generic"))
+		}
+		return
+	}
+
+	stopTyping := r.keepTyping(ctx, in.Responder)
+	defer stopTyping()
+	err = r.sessions.With(ctx, in.Channel, in.ChatID, func(s *session.Session) error {
+		r.respond(ctx, s, in, text, id)
 		return nil
 	})
 	switch {
@@ -130,9 +200,32 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	}
 }
 
-// respond runs the agent for one message and delivers the result. It runs
-// inside the chat's exclusive session lock.
-func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Incoming, text string) {
+// store saves an incoming message and returns its id.
+func (r *Router) store(ctx context.Context, in channel.Incoming, text string) (int64, error) {
+	var id int64
+	err := r.sessions.Record(in.Channel, in.ChatID, func(s *session.Session) error {
+		var err error
+		id, err = r.agent.Record(ctx, s, r.input(in, text))
+		return err
+	})
+	return id, err
+}
+
+func (r *Router) input(in channel.Incoming, text string) agent.Input {
+	return agent.Input{
+		Text:    text,
+		Sender:  in.UserName,
+		IsGroup: in.IsGroup,
+		Channel: in.Channel,
+		UserID:  in.UserID,
+		Origin:  in.Origin,
+		SentAt:  in.ReceivedAt,
+	}
+}
+
+// respond runs the agent for one stored message and delivers the result. It
+// runs inside the chat's exclusive session lock.
+func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Incoming, text string, id int64) {
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
@@ -142,14 +235,9 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 
 	reqCtx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
 	defer cancel()
-	reply, err := r.agent.Reply(reqCtx, s, agent.Input{
-		Text:    text,
-		Sender:  in.UserName,
-		IsGroup: in.IsGroup,
-		Channel: in.Channel,
-		UserID:  in.UserID,
-		Origin:  in.Origin,
-	})
+	input := r.input(in, text)
+	input.AnswerFor = id
+	reply, err := r.agent.Respond(reqCtx, s, input)
 	switch {
 	case errors.Is(err, agent.ErrEmptyResponse):
 		reply = r.tr.T("empty_response")
@@ -205,4 +293,93 @@ func (r *Router) keepTyping(ctx context.Context, resp channel.Responder) (stop f
 		cancel()
 		wg.Wait()
 	}
+}
+
+// Wait blocks until background work (compaction of collected conversations)
+// has finished.
+func (r *Router) Wait() { r.wg.Wait() }
+
+// record keeps a group message that was not addressed to the bot, without
+// answering it, so that the model later knows what people said to each other.
+// It never waits for a running request of the chat: collecting messages must
+// not queue up behind a slow model, nor use up the chat's request queue.
+func (r *Router) record(ctx context.Context, in channel.Incoming) {
+	if r.cfg.GroupContext != GroupContextAll {
+		return
+	}
+	text := strings.TrimSpace(in.Text)
+	if text == "" || !r.isAllowed(in) {
+		return
+	}
+	if !r.recordLimiter.Allow(in.Channel + ":" + in.ChatID) {
+		return // a flood: keep what we have rather than the whole stream
+	}
+	if rs := []rune(text); len(rs) > maxRecordRunes {
+		text = string(rs[:maxRecordRunes]) + "…"
+	}
+	var count int
+	err := r.sessions.Record(in.Channel, in.ChatID, func(s *session.Session) error {
+		in := in
+		in.IsGroup = true
+		if _, err := r.agent.Record(ctx, s, r.input(in, text)); err != nil {
+			return err
+		}
+		count, _ = s.Count(ctx)
+		// Last resort when compaction cannot run (the model is down, say):
+		// the chat must not grow without bound.
+		if r.cfg.CompactAfter > 0 && count > 5*r.cfg.CompactAfter {
+			_, _ = s.Prune(ctx, 3*r.cfg.CompactAfter)
+		}
+		return nil
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			r.log.Warn("could not keep a group message", "channel", in.Channel, "chat", in.ChatID, "err", err)
+		}
+		return
+	}
+	if r.cfg.CompactAfter > 0 && count > r.cfg.CompactAfter {
+		r.scheduleCompaction(ctx, in.Channel, in.ChatID)
+	}
+}
+
+// scheduleCompaction summarises a chat in the background. A chat that
+// nobody addresses never reaches the compaction that normally follows an
+// answer, so collecting messages has to trigger it, at most every few minutes.
+func (r *Router) scheduleCompaction(ctx context.Context, channelName, chatID string) {
+	key := channelName + ":" + chatID
+	r.mu.Lock()
+	if last, ok := r.compactAt[key]; ok && time.Since(last) < compactRetry {
+		r.mu.Unlock()
+		return
+	}
+	if len(r.compactAt) > 10000 {
+		for k, t := range r.compactAt {
+			if time.Since(t) >= compactRetry {
+				delete(r.compactAt, k)
+			}
+		}
+	}
+	r.compactAt[key] = time.Now()
+	r.mu.Unlock()
+
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		err := r.sessions.With(ctx, channelName, chatID, func(s *session.Session) error {
+			select {
+			case r.sem <- struct{}{}:
+				defer func() { <-r.sem }()
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			cctx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
+			defer cancel()
+			_, err := r.agent.MaybeCompact(cctx, s)
+			return err
+		})
+		if err != nil && !errors.Is(err, session.ErrBusy) && ctx.Err() == nil {
+			r.log.Warn("background compaction failed", "channel", channelName, "chat", chatID, "err", err)
+		}
+	}()
 }

@@ -149,6 +149,7 @@ type tgChat struct {
 
 type tgMessage struct {
 	MessageID       int64      `json:"message_id"`
+	Date            int64      `json:"date"`
 	MessageThreadID int64      `json:"message_thread_id"`
 	IsTopicMessage  bool       `json:"is_topic_message"`
 	From            *tgUser    `json:"from"`
@@ -195,6 +196,7 @@ func (c *Channel) Run(ctx context.Context, sink channel.Sink) error {
 	}
 	c.log.Info("telegram bot connected", "username", c.botUser)
 
+	orderer := channel.NewOrderer()
 	var offset int64
 	backoff := time.Second
 	for ctx.Err() == nil {
@@ -230,9 +232,22 @@ func (c *Channel) Run(ctx context.Context, sink channel.Sink) error {
 			if !ok {
 				continue
 			}
+			// Updates are handled concurrently, but a chat's messages must be
+			// taken in the order they were sent (a backlog after downtime arrives
+			// as one batch): each waits until the one before it was accepted.
+			wait, accepted := orderer.Enter(in.ChatID)
+			in.Accepted = accepted
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer accepted()
+				if wait != nil {
+					select {
+					case <-wait:
+					case <-ctx.Done():
+						return
+					}
+				}
 				sink(ctx, in)
 			}()
 		}
@@ -329,7 +344,12 @@ func (c *Channel) convert(m *tgMessage) (channel.Incoming, bool) {
 	if m.IsTopicMessage {
 		thread = m.MessageThreadID
 	}
+	var sentAt time.Time
+	if m.Date > 0 {
+		sentAt = time.Unix(m.Date, 0)
+	}
 	return channel.Incoming{
+		ReceivedAt:    sentAt,
 		Channel:       "telegram",
 		ChatID:        strconv.FormatInt(m.Chat.ID, 10),
 		UserID:        strconv.FormatInt(m.From.ID, 10),

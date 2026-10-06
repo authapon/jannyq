@@ -265,3 +265,58 @@ func TestWebAndServerSettings(t *testing.T) {
 		t.Errorf("web settings checked although --web is off: %v", err)
 	}
 }
+
+func TestTimezoneAndGroupContext(t *testing.T) {
+	base := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	with := func(extra map[string]string) map[string]string {
+		e := map[string]string{}
+		for k, v := range base {
+			e[k] = v
+		}
+		for k, v := range extra {
+			e[k] = v
+		}
+		return e
+	}
+	c, err := load(t, nil, base)
+	if err != nil || c.GroupContext != "all" || c.Timezone != "" {
+		t.Fatalf("defaults: %+v err=%v", c, err)
+	}
+	if loc, err := c.Location(); err != nil || loc != time.Local {
+		t.Errorf("no timezone, English: %v %v", loc, err)
+	}
+	c, _ = load(t, nil, with(map[string]string{"JANNYQ_LANG": "th"}))
+	if loc, err := c.Location(); err != nil || loc.String() != "Asia/Bangkok" {
+		t.Errorf("Thai default: %v %v", loc, err)
+	}
+	c, _ = load(t, nil, with(map[string]string{"JANNYQ_LANG": "th-TH", "JANNYQ_TIMEZONE": "Europe/London"}))
+	if loc, err := c.Location(); err != nil || loc.String() != "Europe/London" {
+		t.Errorf("explicit timezone must win: %v %v", loc, err)
+	}
+	// the zone really works without a system tz database (embedded in the binary)
+	ts := time.Date(1997, 7, 16, 18, 20, 44, 0, time.UTC).In(mustLoc(t, c))
+	if got := ts.Format("2006-01-02T15:04:05-07:00"); got != "1997-07-16T19:20:44+01:00" {
+		t.Errorf("London in July = %s", got)
+	}
+	for name, args := range map[string][]string{
+		"unknown zone":     {"--timezone=Mars/Olympus"},
+		"not an IANA name": {"--timezone=GMT+7 please"},
+		"bad context":      {"--group-context=some"},
+	} {
+		if _, err := load(t, args, base); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if c, err := load(t, []string{"--group-context=addressed", "--timezone=Asia/Tokyo"}, base); err != nil || c.GroupContext != "addressed" {
+		t.Errorf("valid values rejected: %v", err)
+	}
+}
+
+func mustLoc(t *testing.T, c *Config) *time.Location {
+	t.Helper()
+	loc, err := c.Location()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loc
+}

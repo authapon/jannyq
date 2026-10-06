@@ -86,7 +86,6 @@ func (c *Channel) Run(ctx context.Context, sink channel.Sink) error {
 				Channel:   "cli",
 				ChatID:    "local",
 				UserID:    "local",
-				UserName:  "you",
 				Text:      line,
 				Addressed: true,
 				Responder: responder{c: c, mu: &mu},

@@ -81,11 +81,12 @@ const (
 
 // Channel is the web chat channel.
 type Channel struct {
-	cfg    Config
-	host   Host
-	log    *slog.Logger
-	signer *signer
-	hub    *hub
+	cfg     Config
+	host    Host
+	log     *slog.Logger
+	signer  *signer
+	hub     *hub
+	orderer *channel.Orderer
 
 	sendLimiter    *ratelimit.Limiter
 	loginLimiter   *ratelimit.Limiter
@@ -130,6 +131,7 @@ func New(cfg Config, host Host, log *slog.Logger) (*Channel, error) {
 		cfg: cfg, host: host, log: log.With("channel", "web"),
 		signer:         newSigner(cfg.Secret, cfg.AccessCode),
 		hub:            newHub(),
+		orderer:        channel.NewOrderer(),
 		sendLimiter:    ratelimit.New(cfg.IPRate, time.Minute),
 		loginLimiter:   ratelimit.New(10, time.Minute),
 		sessionLimiter: ratelimit.New(cfg.NewSessionsPerHour, time.Hour),
@@ -415,15 +417,24 @@ func (c *Channel) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	origin := c.host.ClientKey(r)
+	wait, accepted := c.orderer.Enter(id) // in arrival order, before the goroutine starts
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer c.inFlight.Add(-1)
+		defer accepted()
+		if wait != nil {
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return
+			}
+		}
 		sink(ctx, channel.Incoming{
+			Accepted:  accepted,
 			Channel:   "web",
 			ChatID:    id,
 			UserID:    id,
-			UserName:  "web user",
 			Text:      text,
 			Addressed: true,
 			Origin:    origin,

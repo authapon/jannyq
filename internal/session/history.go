@@ -2,10 +2,27 @@ package session
 
 import "github.com/authapon/jannyq/internal/llm"
 
-// Stored is a persisted message with its row ID.
+// Stored is a persisted message with its row ID. For user messages the
+// sender and the time the message was sent are kept next to the text, so the
+// way they are shown to the model can change without touching stored data.
 type Stored struct {
-	ID      int64
-	Message llm.Message
+	ID         int64
+	Message    llm.Message
+	SenderID   string // platform user id; empty for assistant and tool messages
+	SenderName string
+	// SentAt is when the message was sent, as ISO 8601 with the UTC offset
+	// that applied then, e.g. 1997-07-16T19:20:44+01:00. It is empty for
+	// messages stored before this was recorded; CreatedAt is then the fallback.
+	SentAt    string
+	CreatedAt int64 // Unix seconds at which the row was written
+}
+
+// Entry is a message to store, with optional sender information.
+type Entry struct {
+	Message    llm.Message
+	SenderID   string
+	SenderName string
+	SentAt     string
 }
 
 // sanitizeHistory makes a stored history safe to send to a model: it must

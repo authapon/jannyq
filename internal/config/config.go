@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // so that time zones work in minimal containers too
 )
 
 // Config holds all settings.
@@ -23,6 +24,9 @@ type Config struct {
 	// General
 	Lang     string
 	LangMode string
+	// Timezone is an IANA name such as Asia/Bangkok; it sets the offset in the
+	// timestamps the model sees. Empty: Asia/Bangkok for --lang th, else the server's.
+	Timezone string
 	BotName  string
 	DataDir  string
 	Listen   string
@@ -86,6 +90,7 @@ type Config struct {
 	// Access control and limits
 	AllowedUsers    []string
 	GroupReply      string
+	GroupContext    string
 	RateLimit       int
 	MaxConcurrent   int
 	RequestTimeout  time.Duration
@@ -208,6 +213,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	// General
 	l.str(&c.Lang, "lang", "en", "main language for messages and replies (en, th, ...)")
 	l.str(&c.LangMode, "lang-mode", "follow-user", "reply language: follow-user (mirror the user) or default (always --lang)")
+	l.str(&c.Timezone, "timezone", "", "time zone for message timestamps, e.g. Asia/Bangkok (default: Asia/Bangkok for --lang th, else the server's)")
 	l.str(&c.BotName, "bot-name", "Jannyq", "name the bot uses for itself")
 	l.str(&c.DataDir, "data-dir", ".", "directory for chat databases and files")
 	l.str(&c.Listen, "listen", "", "address for the HTTP server (health check), e.g. :8080; empty disables it")
@@ -272,6 +278,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	// Access control and limits
 	l.str(&allowed, "allowed-users", "", "comma-separated user IDs (or channel:id) allowed to chat; empty allows everyone")
 	l.str(&c.GroupReply, "group-reply", "mention", "reply in groups: mention (only when addressed) or all")
+	l.str(&c.GroupContext, "group-context", "all", "what the bot remembers of groups: all (every message, so it knows who said what) or addressed (only messages for the bot)")
 	l.integer(&c.RateLimit, "rate-limit", 20, "messages per user per minute; 0 = unlimited")
 	l.integer(&c.MaxConcurrent, "max-concurrent", 4, "maximum simultaneous model runs")
 	l.duration(&c.RequestTimeout, "request-timeout", 10*time.Minute, "maximum time to answer one message")
@@ -347,6 +354,12 @@ func (c *Config) validate() error {
 	}
 	if c.GroupReply != "mention" && c.GroupReply != "all" {
 		bad("--group-reply must be mention or all")
+	}
+	if c.GroupContext != "all" && c.GroupContext != "addressed" {
+		bad("--group-context must be all or addressed")
+	}
+	if _, err := c.Location(); err != nil {
+		bad("--timezone: %v", err)
 	}
 	if c.MaxConcurrent < 1 {
 		bad("--max-concurrent must be at least 1")
@@ -444,4 +457,20 @@ func usageFunc(fs *flag.FlagSet, w io.Writer, synopsis string) func() {
 			fmt.Fprintf(w, "  --%s\n        %s%s\n", f.Name, f.Usage, def)
 		}
 	}
+}
+
+// Location returns the time zone for message timestamps.
+func (c *Config) Location() (*time.Location, error) {
+	name := strings.TrimSpace(c.Timezone)
+	if name == "" && strings.HasPrefix(strings.ToLower(c.Lang), "th") {
+		name = "Asia/Bangkok"
+	}
+	if name == "" {
+		return time.Local, nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("unknown time zone %q (use an IANA name such as Asia/Bangkok or Europe/London)", name)
+	}
+	return loc, nil
 }

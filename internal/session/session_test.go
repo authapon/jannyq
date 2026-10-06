@@ -2,10 +2,12 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -361,4 +363,233 @@ func TestPeekOnClosedManagerAndNewChat(t *testing.T) {
 	if err := m.Peek("c", "new", func(*Session) error { return nil }); !errors.Is(err, ErrClosed) {
 		t.Errorf("err = %v", err)
 	}
+}
+
+func TestAppendEntriesKeepsSenderAndTime(t *testing.T) {
+	withSession(t, func(s *Session) {
+		err := s.AppendEntries(ctx,
+			Entry{Message: user("hello"), SenderID: "42", SenderName: "Ann", SentAt: "1997-07-16T19:20:44+01:00"},
+			Entry{Message: assistant("hi Ann")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := s.Messages(ctx)
+		if len(got) != 2 {
+			t.Fatalf("got %d messages", len(got))
+		}
+		u := got[0]
+		if u.SenderID != "42" || u.SenderName != "Ann" || u.SentAt != "1997-07-16T19:20:44+01:00" || u.CreatedAt == 0 {
+			t.Errorf("user row = %+v", u)
+		}
+		if a := got[1]; a.SenderID != "" || a.SentAt != "" {
+			t.Errorf("assistant row must carry no sender: %+v", a)
+		}
+	})
+}
+
+// legacyDB creates a session database the way the first versions did, before
+// sender and time were recorded.
+func legacyDB(t *testing.T, base string) {
+	t.Helper()
+	dir := sessionDir(base, "tg", "group1")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(dir, "session.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+			tool_calls TEXT, tool_call_id TEXT NOT NULL DEFAULT '', tool_name TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)`,
+		`INSERT INTO meta(key, value) VALUES ('chat', 'tg:group1')`,
+		`INSERT INTO messages(role, content, created_at) VALUES ('user', 'Ann: old question', 868990844)`,
+		`INSERT INTO messages(role, content, created_at) VALUES ('assistant', 'old answer', 868990850)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestOldDatabasesAreMigratedAndKeepTheirMessages(t *testing.T) {
+	base := t.TempDir()
+	legacyDB(t, base)
+	m := NewManager(base, 4, 4)
+	defer m.Close()
+	err := m.With(ctx, "tg", "group1", func(s *Session) error {
+		got, err := s.Messages(ctx)
+		if err != nil || len(got) != 2 || got[0].Message.Content != "Ann: old question" {
+			t.Fatalf("legacy messages = %+v err = %v", got, err)
+		}
+		if got[0].SentAt != "" || got[0].SenderName != "" || got[0].CreatedAt != 868990844 {
+			t.Errorf("legacy row = %+v", got[0])
+		}
+		// the migrated database accepts new-style rows next to the old ones
+		if err := s.AppendEntries(ctx, Entry{Message: user("new"), SenderID: "1", SenderName: "Bob", SentAt: "2026-10-06T14:32:05+07:00"}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ = s.Messages(ctx)
+		if len(got) != 3 || got[2].SenderName != "Bob" {
+			t.Errorf("after append: %+v", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+
+	// reopening a migrated database is a no-op
+	m = NewManager(base, 4, 4)
+	defer m.Close()
+	_ = m.With(ctx, "tg", "group1", func(s *Session) error {
+		var v int
+		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
+			t.Errorf("user_version = %d err = %v", v, err)
+		}
+		if got, _ := s.Messages(ctx); len(got) != 3 {
+			t.Errorf("messages after reopening: %d", len(got))
+		}
+		return nil
+	})
+}
+
+func TestGroupFlag(t *testing.T) {
+	withSession(t, func(s *Session) {
+		if s.IsGroup(ctx) {
+			t.Error("a new chat is not a group")
+		}
+		_ = s.SetGroup(ctx, true)
+		if !s.IsGroup(ctx) {
+			t.Error("flag not stored")
+		}
+		_ = s.Reset(ctx)
+		if !s.IsGroup(ctx) {
+			t.Error("/reset must not turn a group into a private chat")
+		}
+		_ = s.SetGroup(ctx, false)
+		if s.IsGroup(ctx) {
+			t.Error("flag not cleared")
+		}
+	})
+}
+
+func TestPruneKeepsTheNewestMessages(t *testing.T) {
+	withSession(t, func(s *Session) {
+		for i := 0; i < 10; i++ {
+			_ = s.Append(ctx, user("q"+strconv.Itoa(i)))
+		}
+		_ = s.Append(ctx, call("c1"), result("c1"), assistant("a"))
+		n, err := s.Prune(ctx, 4)
+		if err != nil || n == 0 {
+			t.Fatalf("pruned %d, err %v", n, err)
+		}
+		left, _ := s.Messages(ctx)
+		var texts []string
+		for _, m := range left {
+			if m.Message.Role == llm.RoleUser {
+				texts = append(texts, m.Message.Content)
+			}
+		}
+		if got := strings.Join(texts, ","); got != "q7,q8,q9" {
+			t.Errorf("remaining user messages = %s", got)
+		}
+		if c, _ := s.Count(ctx); c != 4 {
+			t.Errorf("count = %d, want 4", c)
+		}
+		// nothing to prune
+		if n, err := s.Prune(ctx, 100); err != nil || n != 0 {
+			t.Errorf("pruned %d, err %v", n, err)
+		}
+	})
+	withSession(t, func(s *Session) {
+		if n, err := s.Prune(ctx, 3); err != nil || n != 0 {
+			t.Errorf("empty chat: %d %v", n, err)
+		}
+	})
+}
+
+func TestRecordWhileARequestIsRunning(t *testing.T) {
+	m := NewManager(t.TempDir(), 4, 1) // a queued request would be refused
+	defer m.Close()
+	started, release := make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.With(ctx, "c", "1", func(s *Session) error {
+			_ = s.Append(ctx, user("question"))
+			close(started)
+			<-release
+			return s.Append(ctx, assistant("answer"))
+		})
+	}()
+	<-started
+	for i := 0; i < 20; i++ {
+		err := m.Record("c", "1", func(s *Session) error {
+			return s.AppendEntries(ctx, Entry{Message: user("chatter " + strconv.Itoa(i)), SenderID: "9", SenderName: "Bob", SentAt: "2026-10-06T14:00:00+07:00"})
+		})
+		if err != nil {
+			t.Fatalf("recording %d failed: %v", i, err)
+		}
+	}
+	close(release)
+	<-done
+	_ = m.With(ctx, "c", "1", func(s *Session) error {
+		got, _ := s.Messages(ctx)
+		if len(got) != 22 || got[0].Message.Content != "question" || got[21].Message.Content != "answer" {
+			t.Errorf("history has %d messages", len(got))
+		}
+		return nil
+	})
+}
+
+func TestAppendEntryReturnsIdsAndLastID(t *testing.T) {
+	withSession(t, func(s *Session) {
+		if id, err := s.LastID(ctx); err != nil || id != 0 {
+			t.Errorf("empty chat: id=%d err=%v", id, err)
+		}
+		a, err := s.AppendEntry(ctx, Entry{Message: user("one"), SenderID: "1", SenderName: "Ann", SentAt: "2026-10-06T10:00:00+07:00"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := s.AppendEntry(ctx, Entry{Message: user("two")})
+		if a <= 0 || b <= a {
+			t.Errorf("ids = %d, %d", a, b)
+		}
+		if last, _ := s.LastID(ctx); last != b {
+			t.Errorf("LastID = %d, want %d", last, b)
+		}
+		got, _ := s.Messages(ctx)
+		if got[0].ID != a || got[0].SenderName != "Ann" || got[1].ID != b {
+			t.Errorf("stored = %+v", got)
+		}
+	})
+}
+
+func TestResetUpToKeepsLaterMessages(t *testing.T) {
+	withSession(t, func(s *Session) {
+		_ = s.Append(ctx, user("old 1"), assistant("old 2"))
+		mark, _ := s.LastID(ctx)
+		_ = s.Append(ctx, user("after 1"), assistant("after 2"))
+		_ = s.SetMeta(ctx, metaSummary, "summary of the old")
+		if err := s.ResetUpTo(ctx, mark); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := s.Messages(ctx)
+		if len(got) != 2 || got[0].Message.Content != "after 1" {
+			t.Errorf("after the reset: %+v", got)
+		}
+		if sum, _ := s.Summary(ctx); sum != "" {
+			t.Errorf("the summary of forgotten messages survived: %q", sum)
+		}
+		// resetting up to 0 forgets nothing but the summary
+		_ = s.SetMeta(ctx, metaSummary, "x")
+		_ = s.ResetUpTo(ctx, 0)
+		if n, _ := s.Count(ctx); n != 2 {
+			t.Errorf("count = %d", n)
+		}
+	})
 }

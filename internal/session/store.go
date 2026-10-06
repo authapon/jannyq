@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,42 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 `
 
+// schemaVersion is the current value of PRAGMA user_version.
+const schemaVersion = 1
+
+// migrate brings a database created by an older version up to date.
+func migrate(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v >= schemaVersion {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if v < 1 { // who said it, and when
+		for _, stmt := range []string{
+			`ALTER TABLE messages ADD COLUMN sender_id   TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE messages ADD COLUMN sender_name TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE messages ADD COLUMN sent_at     TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 const (
+	metaGroup            = "group"
 	metaSummary          = "summary"
 	metaLastPromptTokens = "last_prompt_tokens"
 )
@@ -69,6 +105,10 @@ func openSession(channel, chatID, dir string) (*Session, error) {
 		db.Close()
 		return nil, fmt.Errorf("init session db: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate session db: %w", err)
+	}
 	if _, err := db.Exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('chat', ?)`, channel+":"+chatID); err != nil {
 		db.Close()
 		return nil, err
@@ -80,7 +120,17 @@ func (s *Session) close() error { return s.db.Close() }
 
 // Append stores messages atomically, in order.
 func (s *Session) Append(ctx context.Context, msgs ...llm.Message) error {
-	if len(msgs) == 0 {
+	entries := make([]Entry, len(msgs))
+	for i, m := range msgs {
+		entries[i] = Entry{Message: m}
+	}
+	return s.AppendEntries(ctx, entries...)
+}
+
+// AppendEntries stores messages, with their sender and send time, atomically
+// and in order. It is safe to call while a request for this chat is running.
+func (s *Session) AppendEntries(ctx context.Context, entries ...Entry) error {
+	if len(entries) == 0 {
 		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -89,7 +139,8 @@ func (s *Session) Append(ctx context.Context, msgs ...llm.Message) error {
 	}
 	defer tx.Rollback()
 	now := time.Now().Unix()
-	for _, m := range msgs {
+	for _, e := range entries {
+		m := e.Message
 		var calls any
 		if len(m.ToolCalls) > 0 {
 			b, err := json.Marshal(m.ToolCalls)
@@ -99,18 +150,49 @@ func (s *Session) Append(ctx context.Context, msgs ...llm.Message) error {
 			calls = string(b)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO messages(role, content, tool_calls, tool_call_id, tool_name, created_at) VALUES (?,?,?,?,?,?)`,
-			string(m.Role), m.Content, calls, m.ToolCallID, m.Name, now); err != nil {
+			`INSERT INTO messages(role, content, tool_calls, tool_call_id, tool_name, created_at, sender_id, sender_name, sent_at)
+			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			string(m.Role), m.Content, calls, m.ToolCallID, m.Name, now, e.SenderID, e.SenderName, e.SentAt); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
+// AppendEntry stores one message and returns its id. Like AppendEntries it is
+// safe to call while a request for this chat is running.
+func (s *Session) AppendEntry(ctx context.Context, e Entry) (int64, error) {
+	m := e.Message
+	var calls any
+	if len(m.ToolCalls) > 0 {
+		b, err := json.Marshal(m.ToolCalls)
+		if err != nil {
+			return 0, err
+		}
+		calls = string(b)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages(role, content, tool_calls, tool_call_id, tool_name, created_at, sender_id, sender_name, sent_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		string(m.Role), m.Content, calls, m.ToolCallID, m.Name, time.Now().Unix(), e.SenderID, e.SenderName, e.SentAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// LastID returns the id of the newest stored message (0 when there is none).
+func (s *Session) LastID(ctx context.Context) (int64, error) {
+	var id sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(id) FROM messages`).Scan(&id)
+	return id.Int64, err
+}
+
 // Messages returns the sanitised message history, oldest first.
 func (s *Session) Messages(ctx context.Context) ([]Stored, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, role, content, tool_calls, tool_call_id, tool_name FROM messages ORDER BY id`)
+		`SELECT id, role, content, tool_calls, tool_call_id, tool_name, sender_id, sender_name, sent_at, created_at
+		 FROM messages ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +202,8 @@ func (s *Session) Messages(ctx context.Context) ([]Stored, error) {
 		var st Stored
 		var role string
 		var calls sql.NullString
-		if err := rows.Scan(&st.ID, &role, &st.Message.Content, &calls, &st.Message.ToolCallID, &st.Message.Name); err != nil {
+		if err := rows.Scan(&st.ID, &role, &st.Message.Content, &calls, &st.Message.ToolCallID, &st.Message.Name,
+			&st.SenderID, &st.SenderName, &st.SentAt, &st.CreatedAt); err != nil {
 			return nil, err
 		}
 		st.Message.Role = llm.Role(role)
@@ -200,6 +283,45 @@ func (s *Session) SetMeta(ctx context.Context, key, value string) error {
 	return err
 }
 
+// IsGroup reports whether the chat is a group (several people talk to the bot).
+func (s *Session) IsGroup(ctx context.Context) bool {
+	v, _ := s.Meta(ctx, metaGroup)
+	return v == "1"
+}
+
+// SetGroup records whether the chat is a group.
+func (s *Session) SetGroup(ctx context.Context, group bool) error {
+	v := "0"
+	if group {
+		v = "1"
+	}
+	return s.SetMeta(ctx, metaGroup, v)
+}
+
+// Prune deletes the oldest messages so that about keep conversational
+// messages remain, and returns how many rows were removed. It is the last
+// resort for chats that keep growing although compaction cannot run.
+func (s *Session) Prune(ctx context.Context, keep int) (int64, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	var cutoff int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM messages WHERE role = 'user' OR (role = 'assistant' AND content != '')
+		 ORDER BY id DESC LIMIT 1 OFFSET ?`, keep-1).Scan(&cutoff)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE id < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // Summary returns the running summary of compacted messages ("" if none).
 func (s *Session) Summary(ctx context.Context) (string, error) { return s.Meta(ctx, metaSummary) }
 
@@ -238,13 +360,18 @@ func (s *Session) Compact(ctx context.Context, upToID int64, summary string) err
 }
 
 // Reset forgets the whole conversation.
-func (s *Session) Reset(ctx context.Context) error {
+func (s *Session) Reset(ctx context.Context) error { return s.ResetUpTo(ctx, math.MaxInt64) }
+
+// ResetUpTo forgets the conversation as far as message id upTo and the summary
+// of it. Messages stored later are kept: they were sent after the reset was
+// asked for, even if the reset itself had to wait its turn.
+func (s *Session) ResetUpTo(ctx context.Context, upTo int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM messages`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id <= ?`, upTo); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM meta WHERE key IN (?, ?)`, metaSummary, metaLastPromptTokens); err != nil {

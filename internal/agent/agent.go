@@ -44,6 +44,12 @@ type Config struct {
 
 	ToolMaxOutput int // max characters of one tool result kept in history
 
+	// Location is the time zone in which message times are recorded and
+	// shown; nil means the server's local time. TimezoneName is how the
+	// system prompt names it (default: the location's name).
+	Location     *time.Location
+	TimezoneName string
+
 	// Skills, when set, lists skills in the system prompt (the load_skill
 	// tool must be registered for the model to use them).
 	Skills SkillCatalog
@@ -62,6 +68,12 @@ type Input struct {
 	Channel string
 	UserID  string
 	Origin  string // see channel.Incoming.Origin
+	// SentAt is when the message was sent; the zero value means "now".
+	SentAt time.Time
+	// AnswerFor is the id returned by Record of the message being answered.
+	// When later messages were stored while it waited, the model is told which
+	// one to answer. Zero means the newest.
+	AnswerFor int64
 }
 
 // Agent drives conversations.
@@ -92,6 +104,12 @@ func New(cfg Config, p llm.Provider, tools *tool.Registry, log *slog.Logger) *Ag
 	if cfg.ToolMaxOutput <= 0 {
 		cfg.ToolMaxOutput = 12000
 	}
+	if cfg.Location == nil {
+		cfg.Location = time.Local
+	}
+	if cfg.TimezoneName == "" {
+		cfg.TimezoneName = cfg.Location.String()
+	}
 	if tools == nil {
 		tools = tool.NewRegistry()
 	}
@@ -108,16 +126,56 @@ func cleanReply(s string) string {
 	return strings.TrimSpace(thinkRe.ReplaceAllString(s, ""))
 }
 
-// Reply records the user's message, runs the model (and any tools it calls)
-// and returns the final answer, which is also stored in the history.
+// storeUser saves an incoming message together with who sent it and when, and
+// returns its id. How sender and time are shown to the model is decided later,
+// when the prompt is built.
+func (a *Agent) storeUser(ctx context.Context, s *session.Session, in Input) (int64, error) {
+	sent := in.SentAt
+	if sent.IsZero() {
+		sent = a.now()
+	}
+	name := strings.TrimSpace(in.Sender)
+	if rs := []rune(name); len(rs) > 100 {
+		name = string(rs[:100])
+	}
+	if s.IsGroup(ctx) != in.IsGroup {
+		if err := s.SetGroup(ctx, in.IsGroup); err != nil {
+			return 0, err
+		}
+	}
+	return s.AppendEntry(ctx, session.Entry{
+		Message:    llm.Message{Role: llm.RoleUser, Content: strings.TrimSpace(in.Text)},
+		SenderID:   in.UserID,
+		SenderName: name,
+		SentAt:     FormatTime(sent, a.cfg.Location),
+	})
+}
+
+// Record stores a message without answering it and returns its id. It is how
+// messages are taken in, in the order they were sent, and how group
+// conversations that nobody asked the bot to answer are kept for later.
+func (a *Agent) Record(ctx context.Context, s *session.Session, in Input) (int64, error) {
+	id, err := a.storeUser(ctx, s, in)
+	if err != nil {
+		return 0, fmt.Errorf("store message: %w", err)
+	}
+	return id, nil
+}
+
+// Reply stores the user's message and answers it: Record followed by Respond.
 func (a *Agent) Reply(ctx context.Context, s *session.Session, in Input) (string, error) {
-	text := strings.TrimSpace(in.Text)
-	if in.IsGroup && in.Sender != "" {
-		text = in.Sender + ": " + text
+	id, err := a.Record(ctx, s, in)
+	if err != nil {
+		return "", err
 	}
-	if err := s.Append(ctx, llm.Message{Role: llm.RoleUser, Content: text}); err != nil {
-		return "", fmt.Errorf("store message: %w", err)
-	}
+	in.AnswerFor = id
+	return a.Respond(ctx, s, in)
+}
+
+// Respond runs the model (and any tools it calls) over a conversation whose
+// latest user message has already been stored, and returns the final answer,
+// which is also stored in the history.
+func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (string, error) {
 	// Make room first; failing to compact must not block answering.
 	if _, err := a.MaybeCompact(ctx, s); err != nil {
 		a.log.Warn("compaction failed", "chat", s.Channel+":"+s.ChatID, "err", err)
@@ -141,10 +199,8 @@ func (a *Agent) Reply(ctx context.Context, s *session.Session, in Input) (string
 		if err != nil {
 			return "", err
 		}
-		history := make([]llm.Message, 0, len(stored))
-		for _, st := range stored {
-			history = append(history, st.Message)
-		}
+		history := a.renderHistory(cc.SessionKey, in.IsGroup, stored)
+		note := a.answerNote(cc.SessionKey, in.IsGroup, stored, in.AnswerFor)
 
 		var defs []llm.ToolDef
 		final := step == a.cfg.MaxSteps // out of tool rounds: force an answer
@@ -152,6 +208,9 @@ func (a *Agent) Reply(ctx context.Context, s *session.Session, in Input) (string
 			defs = a.tools.Defs()
 		}
 		msgs := a.buildMessages(in, summary, history, len(defs) > 0, final)
+		if note != "" {
+			msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: note})
+		}
 
 		resp, err := a.chat(ctx, llm.Request{
 			Model:       a.cfg.Model,
@@ -202,7 +261,7 @@ func (a *Agent) Reply(ctx context.Context, s *session.Session, in Input) (string
 // buildMessages assembles the model input: system prompt (with the summary
 // of compacted history) followed by the stored messages.
 func (a *Agent) buildMessages(in Input, summary string, history []llm.Message, hasTools, final bool) []llm.Message {
-	sys := a.systemPrompt(in, hasTools, a.now())
+	sys := a.systemPrompt(in, hasTools)
 	if summary != "" {
 		sys += "\nSummary of the earlier conversation (older messages were condensed):\n" + summary + "\n"
 	}
@@ -257,4 +316,34 @@ func (a *Agent) runTool(ctx context.Context, cc tool.CallContext, tc llm.ToolCal
 		return "Error: " + err.Error()
 	}
 	return tool.Truncate(out, a.cfg.ToolMaxOutput)
+}
+
+// answerNote tells the model which message to answer when messages were
+// stored after it, which happens when the chat was busy or people kept
+// talking. It goes at the very end of the prompt, so it does not disturb the
+// part of the conversation the model server has already cached. When the
+// message to answer is the newest, there is nothing to say.
+func (a *Agent) answerNote(chatKey string, group bool, stored []session.Stored, answerFor int64) string {
+	if answerFor == 0 {
+		return ""
+	}
+	idx, later := -1, false
+	for i, st := range stored {
+		if st.ID == answerFor {
+			idx = i
+		} else if idx >= 0 && st.Message.Role == llm.RoleUser {
+			later = true
+		}
+	}
+	if idx < 0 || !later {
+		return ""
+	}
+	st := stored[idx]
+	quote := strings.Join(strings.Fields(neutralizeHeaders(st.Message.Content)), " ")
+	if rs := []rune(quote); len(rs) > 160 {
+		quote = string(rs[:160]) + "…"
+	}
+	return fmt.Sprintf("Note from the system (not from a user): you are now answering the message %s %q. "+
+		"The messages after it were sent while it was waiting and will be answered separately; "+
+		"use them as context but do not answer them now.", a.header(chatKey, group, st), quote)
 }

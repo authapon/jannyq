@@ -4,6 +4,8 @@ package channel
 import (
 	"context"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -30,6 +32,14 @@ type Incoming struct {
 	// HasAttachment is true when the message carried a file, photo, etc.
 	// that the channel could not turn into text.
 	HasAttachment bool
+	// ReceivedAt is when the message was sent. Channels set it when the
+	// platform says so; otherwise the router uses the time it arrived.
+	ReceivedAt time.Time
+	// Accepted, when set, is called by the router as soon as the message has
+	// been taken in: stored, or turned away. It happens before any slow work
+	// such as asking the model, so channels that handle messages concurrently
+	// use it (see Orderer) to keep each chat's messages in the order they were sent.
+	Accepted func()
 	// Origin identifies where an anonymous user comes from (the client IP of
 	// the web chat), so that limits cannot be dodged by creating new
 	// identities. Empty for platforms with real accounts.
@@ -90,4 +100,45 @@ func lastBreak(r []rune) int {
 		}
 	}
 	return 0
+}
+
+// Orderer keeps the messages of one chat in the order they arrived when a
+// channel handles them in separate goroutines. Call Enter for each message,
+// in arrival order and before starting its goroutine; the goroutine waits on
+// the returned channel, passes accepted as Incoming.Accepted and also calls
+// it when it is done, so a message that is never accepted cannot hold up the
+// ones behind it.
+type Orderer struct {
+	mu   sync.Mutex
+	tail map[string]chan struct{}
+}
+
+// NewOrderer returns an empty Orderer.
+func NewOrderer() *Orderer { return &Orderer{tail: map[string]chan struct{}{}} }
+
+// Enter registers a message of the chat identified by key. wait is nil when
+// no earlier message of the chat is still being accepted. accepted may be
+// called any number of times.
+func (o *Orderer) Enter(key string) (wait <-chan struct{}, accepted func()) {
+	cur := make(chan struct{})
+	o.mu.Lock()
+	prev := o.tail[key]
+	o.tail[key] = cur
+	o.mu.Unlock()
+
+	var once sync.Once
+	accepted = func() {
+		once.Do(func() {
+			close(cur)
+			o.mu.Lock()
+			if o.tail[key] == cur { // nobody is queued behind us
+				delete(o.tail, key)
+			}
+			o.mu.Unlock()
+		})
+	}
+	if prev == nil {
+		return nil, accepted
+	}
+	return prev, accepted
 }

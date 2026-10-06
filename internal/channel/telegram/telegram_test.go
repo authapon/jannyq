@@ -3,10 +3,12 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -235,4 +237,124 @@ func TestNetworkErrorsAreRedacted(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "SECRET") {
 		t.Errorf("err = %v", err)
 	}
+}
+
+func TestMessageTimeComesFromTelegram(t *testing.T) {
+	c := newChannel("http://unused")
+	user := &tgUser{ID: 5, FirstName: "Ann"}
+	in, ok := c.convert(&tgMessage{From: user, Date: 869077244, Chat: tgChat{ID: 5, Type: "private"}, Text: "hi"})
+	if !ok || !in.ReceivedAt.Equal(time.Unix(869077244, 0)) {
+		t.Errorf("ReceivedAt = %v", in.ReceivedAt)
+	}
+	// the platform's own time is what counts, even for updates that waited while the bot was down
+	if in.ReceivedAt.Year() != 1997 {
+		t.Errorf("year = %d", in.ReceivedAt.Year())
+	}
+	in, _ = c.convert(&tgMessage{From: user, Chat: tgChat{ID: 5, Type: "private"}, Text: "no date"})
+	if !in.ReceivedAt.IsZero() {
+		t.Errorf("without a date the router must fill in the time, got %v", in.ReceivedAt)
+	}
+	// group chatter keeps its time and speaker
+	in, _ = c.convert(&tgMessage{From: user, Date: 869077300, Chat: tgChat{ID: -100, Type: "supergroup"}, Text: "just talking"})
+	if !in.IsGroup || in.Addressed || in.ReceivedAt.Unix() != 869077300 || in.UserName != "Ann" || in.UserID != "5" {
+		t.Errorf("group message = %+v", in)
+	}
+}
+
+// A backlog (after downtime, or a burst) arrives as one batch of updates.
+// They are handled concurrently, yet each chat's messages must be accepted in
+// the order they were sent, or the stored conversation would be scrambled.
+func TestABatchOfUpdatesIsAcceptedInOrderPerChat(t *testing.T) {
+	var updates []string
+	for i := 1; i <= 30; i++ {
+		chat := -100
+		if i%3 == 0 {
+			chat = -200 // a second chat interleaved in the same batch
+		}
+		updates = append(updates, fmt.Sprintf(
+			`{"update_id":%d,"message":{"message_id":%d,"date":%d,"from":{"id":5,"first_name":"Ann"},"chat":{"id":%d,"type":"supergroup"},"text":"m%d"}}`,
+			1000+i, i, 869077244+i, chat, i))
+	}
+	f := &fakeTelegram{t: t, updates: []string{strings.Join(updates, ",")}}
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	defer srv.Close()
+
+	c := New(Config{Token: token, APIBase: srv.URL, PollTimeout: time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	var mu sync.Mutex
+	accepted := map[string][]int{}
+	var total int
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, func(ctx context.Context, in channel.Incoming) {
+			// uneven, unpredictable "work" before the message is taken in
+			n, _ := strconv.Atoi(strings.TrimPrefix(in.Text, "m"))
+			time.Sleep(time.Duration((n*37)%11) * time.Millisecond)
+			mu.Lock()
+			accepted[in.ChatID] = append(accepted[in.ChatID], n)
+			total++
+			mu.Unlock()
+			in.Accepted()
+			time.Sleep(5 * time.Millisecond) // slow work after acceptance must not hold the next message back
+		})
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		n := total
+		mu.Unlock()
+		if n == 30 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if total != 30 {
+		t.Fatalf("only %d of 30 messages were handled", total)
+	}
+	for chat, got := range accepted {
+		for i := 1; i < len(got); i++ {
+			if got[i] <= got[i-1] {
+				t.Errorf("chat %s: accepted out of order: %v", chat, got)
+				break
+			}
+		}
+	}
+	if len(accepted["-100"]) != 20 || len(accepted["-200"]) != 10 {
+		t.Errorf("messages per chat: %d and %d", len(accepted["-100"]), len(accepted["-200"]))
+	}
+}
+
+func TestAMessageThatIsNeverAcceptedDoesNotStallTheChat(t *testing.T) {
+	updates := `{"update_id":1,"message":{"message_id":1,"date":1,"from":{"id":5,"first_name":"Ann"},"chat":{"id":-100,"type":"supergroup"},"text":"first"}},` +
+		`{"update_id":2,"message":{"message_id":2,"date":2,"from":{"id":5,"first_name":"Ann"},"chat":{"id":-100,"type":"supergroup"},"text":"second"}}`
+	f := &fakeTelegram{t: t, updates: []string{updates}}
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	defer srv.Close()
+	c := New(Config{Token: token, APIBase: srv.URL, PollTimeout: time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan string, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, func(ctx context.Context, in channel.Incoming) {
+			got <- in.Text // returns without ever calling Accepted
+		})
+	}()
+	for _, want := range []string{"first", "second"} {
+		select {
+		case text := <-got:
+			if text != want {
+				t.Errorf("got %q, want %q", text, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%q was never delivered", want)
+		}
+	}
+	cancel()
+	<-done
 }

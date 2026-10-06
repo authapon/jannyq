@@ -138,24 +138,34 @@ func TestLanguageModes(t *testing.T) {
 		LangModeFollowUser: "reply in the language the user writes in; if unclear, reply in Thai",
 	} {
 		a := newAgent(&fakeProvider{}, Config{Lang: "th", LangMode: mode})
-		if got := a.systemPrompt(Input{}, false, a.now()); !strings.Contains(got, want) {
+		if got := a.systemPrompt(Input{}, false); !strings.Contains(got, want) {
 			t.Errorf("%s: prompt lacks %q:\n%s", mode, want, got)
 		}
 	}
 }
 
-func TestGroupSenderPrefixAndPrompt(t *testing.T) {
+func TestGroupMessagesCarryWhoAndWhen(t *testing.T) {
 	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("ok")}}
-	a := newAgent(p, Config{})
+	a := newAgent(p, Config{Location: time.FixedZone("BST", 3600)})
 	withSession(t, func(s *session.Session) {
-		if _, err := a.Reply(ctx, s, Input{Text: "hello", Sender: "Bob", IsGroup: true}); err != nil {
+		sent := time.Date(1997, 7, 16, 18, 20, 44, 0, time.UTC)
+		if _, err := a.Reply(ctx, s, Input{Text: "hello", Sender: "Bob", UserID: "77", IsGroup: true, SentAt: sent}); err != nil {
 			t.Fatal(err)
 		}
-		if h := history(t, s); h[0].Content != "Bob: hello" {
-			t.Errorf("user message = %q", h[0].Content)
+		// the stored text is what the user typed; the header is added when the prompt is built
+		if h := history(t, s); h[0].Content != "hello" {
+			t.Errorf("stored user message = %q", h[0].Content)
+		}
+		if !s.IsGroup(ctx) {
+			t.Error("the chat was not marked as a group")
 		}
 	})
-	if !strings.Contains(p.requests[0].Messages[0].Content, "group chat") {
+	req := p.requests[0]
+	want := "[1997-07-16T19:20:44+01:00] Bob#" + tagFor("test:chat", "77") + ": hello"
+	if got := req.Messages[1].Content; got != want {
+		t.Errorf("user message sent to the model = %q, want %q", got, want)
+	}
+	if !strings.Contains(req.Messages[0].Content, "group chat") {
 		t.Error("group instructions missing from system prompt")
 	}
 }
@@ -397,20 +407,20 @@ func (loadSkillStub) Name() string { return "load_skill" }
 
 func TestPromptMentionsOnlyAvailableTools(t *testing.T) {
 	a := newAgent(&fakeProvider{}, Config{}, &echoTool{})
-	got := a.systemPrompt(Input{}, true, a.now())
+	got := a.systemPrompt(Input{}, true)
 	for _, bad := range []string{"web_search", "web_fetch", "source URLs"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("prompt mentions unavailable %q:\n%s", bad, got)
 		}
 	}
 	a = newAgent(&fakeProvider{}, Config{}, webStub("web_search"), webStub("web_fetch"))
-	got = a.systemPrompt(Input{}, true, a.now())
+	got = a.systemPrompt(Input{}, true)
 	for _, want := range []string{"web_search", "web_fetch", "source URLs"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt lacks %q:\n%s", want, got)
 		}
 	}
-	if a.systemPrompt(Input{}, false, a.now()) == got {
+	if a.systemPrompt(Input{}, false) == got {
 		t.Error("prompt without tools must not describe them")
 	}
 }
@@ -425,17 +435,17 @@ func (webStub) Execute(context.Context, tool.CallContext, []byte) (string, error
 func TestPromptIncludesToolHintsAndSkills(t *testing.T) {
 	skills := fakeSkills{{Name: "csv", Description: "summarise csv files"}, {Name: "pdf", Description: "read pdfs"}}
 	a := newAgent(&fakeProvider{}, Config{Skills: skills}, &hintTool{}, &loadSkillStub{})
-	got := a.systemPrompt(Input{}, true, a.now())
+	got := a.systemPrompt(Input{}, true)
 	for _, want := range []string{"hinted: use me wisely", "- csv: summarise csv files", "- pdf: read pdfs", "call load_skill"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt lacks %q:\n%s", want, got)
 		}
 	}
 	// skills are useless without the load_skill tool, or with no skills
-	if got := newAgent(&fakeProvider{}, Config{Skills: skills}, &hintTool{}).systemPrompt(Input{}, true, time.Now()); strings.Contains(got, "csv") {
+	if got := newAgent(&fakeProvider{}, Config{Skills: skills}, &hintTool{}).systemPrompt(Input{}, true); strings.Contains(got, "csv") {
 		t.Error("skills listed although load_skill is not registered")
 	}
-	if got := newAgent(&fakeProvider{}, Config{Skills: fakeSkills{}}, &loadSkillStub{}).systemPrompt(Input{}, true, time.Now()); strings.Contains(got, "Skills:") {
+	if got := newAgent(&fakeProvider{}, Config{Skills: fakeSkills{}}, &loadSkillStub{}).systemPrompt(Input{}, true); strings.Contains(got, "Skills:") {
 		t.Error("empty skills section printed")
 	}
 }

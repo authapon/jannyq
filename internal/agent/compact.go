@@ -69,7 +69,10 @@ func (a *Agent) Compact(ctx context.Context, s *session.Session, keep int) (bool
 	if err != nil {
 		return false, err
 	}
-	summary, err := a.summarize(ctx, prev, old)
+	// The summariser sees the messages exactly as the model does, with who said
+	// them and when, so that the summary can keep that.
+	rendered := a.renderHistory(s.Channel+":"+s.ChatID, s.IsGroup(ctx), old)
+	summary, err := a.summarize(ctx, prev, rendered)
 	if err != nil {
 		return false, err
 	}
@@ -109,13 +112,16 @@ func estimateStored(stored []session.Stored) int {
 	n := 0
 	for _, st := range stored {
 		n += llm.EstimateMessages([]llm.Message{st.Message})
+		if st.Message.Role == llm.RoleUser {
+			n += headerTokens
+		}
 	}
 	return n
 }
 
 // summarize folds old messages into the running summary, in batches small
 // enough for the model's context window.
-func (a *Agent) summarize(ctx context.Context, summary string, old []session.Stored) (string, error) {
+func (a *Agent) summarize(ctx context.Context, summary string, old []llm.Message) (string, error) {
 	budget := defaultBatchToken
 	if a.cfg.ContextSize > 0 {
 		if b := int(0.5*float64(a.cfg.ContextSize)) - 1500; b > 1000 {
@@ -138,8 +144,8 @@ func (a *Agent) summarize(ctx context.Context, summary string, old []session.Sto
 		batch, tokens = nil, 0
 		return nil
 	}
-	for _, st := range old {
-		line := excerptLine(st.Message)
+	for _, m := range old {
+		line := excerptLine(m)
 		if line == "" {
 			continue
 		}
@@ -185,7 +191,8 @@ func (a *Agent) summarizeBatch(ctx context.Context, summary, excerpt string) (st
 	}
 	system := "You maintain the running summary of a chat between one or more users and an AI assistant. " +
 		"Update the summary so that it also covers the new conversation excerpt. " +
-		"Keep: names of the people and facts about them, their preferences, decisions made, open tasks or questions, " +
+		"Keep: who said or decided what (use the speakers' names) and on which date (YYYY-MM-DD, taken from the " +
+		"message headers), facts about the people, their preferences, decisions made, open tasks or questions, " +
 		"and important details (numbers, names, URLs, commands, file names) plus the conclusions of any searches. " +
 		"Drop greetings and redundant detail. Write in " + i18n.LanguageName(a.cfg.Lang) + ". " +
 		"Output only the updated summary as concise bullet points, at most about 400 words."

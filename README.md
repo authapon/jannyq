@@ -18,6 +18,8 @@ A chat bot written in Go that connects messaging platforms to **Ollama** or any
   - `run_command` — runs a shell command in a sandbox (see [below](#run_command-and-the-sandbox)); open to
     everyone, with per-user rate limits, resource limits and an audit log. **Off by default.**
   - `load_skill` — loads instructions from your [skills](#skills).
+- **Time and names in every conversation**: each user message reaches the model with a header giving when it
+  was sent and, in groups, who sent it (see [below](#conversation-context-time-and-names)).
 - **Memory per chat**: every user (private chat) and every group has its own SQLite database
   (`<data-dir>/sessions/<channel>/<chat>/session.db`). Deleting a chat's directory forgets it.
 - **Context compaction**: when a chat grows past `--compact-after` messages (default 200), or the prompt
@@ -82,6 +84,8 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--llm-model` | **required** | model name |
 | `--context-size` | `0` | model context in tokens; sent as `num_ctx` to Ollama; drives compaction. `0` = unknown |
 | `--lang` | `en` | main language for bot messages and replies (`en`, `th`, …) |
+| `--timezone` | `Asia/Bangkok` for `--lang th`, else the server's | zone of the message timestamps (IANA name, e.g. `Europe/London`) |
+| `--group-context` | `all` | what the bot remembers of groups: `all` (every message) or `addressed` (only those meant for it) |
 | `--lang-mode` | `follow-user` | `follow-user` mirrors the user's language, `default` always uses `--lang` |
 | `--data-dir` | `.` | where chat databases are stored |
 | `--compact-after` | `200` | summarise old messages once a chat exceeds this many |
@@ -121,6 +125,36 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 The model must support **tool calling** for `web_search`/`web_fetch` to work (for Ollama: qwen3, llama3.1+,
 mistral-nemo, …). If a model rejects tools, jannyq logs a warning and keeps chatting without them.
 Always set `--context-size` for Ollama: its default context is small and long pages would be silently cut.
+
+## Conversation context: time and names
+
+Every user message is shown to the model with a header:
+
+```
+[1997-07-16T19:20:44+01:00] Ann#7f3a: shall we meet at noon?     ← group
+[1997-07-16T19:21:02+01:00] translate this please                  ← private chat
+```
+
+- **Time** is ISO 8601 with the UTC offset that applied then (`--timezone`), taken from the platform when it
+  says (Telegram does) and stored with the message. The system prompt contains no clock: the newest header *is*
+  the current time. That keeps the start of the conversation identical from one message to the next, so
+  Ollama/OpenAI can reuse their cache of it instead of reading the whole history again every time.
+- **Names**: in groups the header names the speaker; `#7f3a` is a short tag, stable per person and chat, that tells
+  apart people with the same name (or someone who renames themselves). The platform user id never reaches the
+  model. In private chats the system prompt says once who the model is talking to.
+- **Everything said in a group is kept** (`--group-context all`, the default), also when nobody addressed the
+  bot, so it knows who said what; it only answers when mentioned, replied to, or given a command. Telegram bots
+  need privacy mode turned off (BotFather → `/setprivacy` → Disable) to see group messages; Discord will need the
+  Message Content intent. Use `--group-context addressed` to keep only what is meant for the bot.
+- **Order**: messages are stored in the order they were sent, even when a backlog arrives in one batch or the
+  chat is busy answering. If messages arrived while one was waiting, the model is told which one it is answering.
+- **Compaction** keeps who said what and on which date. Chats that nobody addresses are compacted in the
+  background too, and cannot grow without limit.
+- **Forgery**: names are cleaned (no control or invisible characters, no brackets or colons, 32 characters at
+  most) and lines inside a message that look like a header are turned into plain text, so nobody can pose as
+  someone else; only the header at the very start of a message is genuine, and the system prompt says so.
+
+Chats stored before this version keep working: their messages are shown with the time they were written.
 
 ## Web chat
 

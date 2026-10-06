@@ -24,13 +24,14 @@ func parseCommand(text string) (string, bool) {
 }
 
 // command runs a chat command and reports whether it consumed the message.
-func (r *Router) command(ctx context.Context, in channel.Incoming, cmd string) bool {
+// resetUpTo is the last message id that /reset forgets.
+func (r *Router) command(ctx context.Context, in channel.Incoming, cmd string, resetUpTo int64) bool {
 	switch cmd {
 	case "start", "help":
 		r.say(ctx, in, r.tr.T("help"))
 	case "reset":
 		err := r.sessions.With(ctx, in.Channel, in.ChatID, func(s *session.Session) error {
-			return s.Reset(ctx)
+			return s.ResetUpTo(ctx, resetUpTo)
 		})
 		if err == nil && r.resetWorkspace != nil {
 			ws := sandbox.WorkspaceID(in.Channel + ":" + in.ChatID)
