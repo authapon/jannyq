@@ -180,3 +180,29 @@ func TestClientKeyGroupsIPv6ByNetwork(t *testing.T) {
 		t.Errorf("rotating addresses inside one /64 dodged the limit: %v", got)
 	}
 }
+
+func TestExemptPathsAreNotLimited(t *testing.T) {
+	s := New(Options{Addr: ":0", RatePerMinute: 2, Log: quiet()})
+	s.Mux().HandleFunc("POST /hook", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
+	s.Mux().HandleFunc("GET /x", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
+	s.ExemptFromRateLimit("/hook")
+	h := s.Handler()
+	do := func(method, path string) int {
+		r := httptest.NewRequest(method, path, nil)
+		r.RemoteAddr = "198.51.100.9:1"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	for i := 0; i < 20; i++ {
+		if c := do("POST", "/hook"); c != 204 {
+			t.Fatalf("hook request %d: %d", i, c)
+		}
+	}
+	// the exemption does not use up the address's allowance for other paths, nor extend to them
+	do("GET", "/x")
+	do("GET", "/x")
+	if c := do("GET", "/x"); c != 429 {
+		t.Errorf("other paths stay limited: %d", c)
+	}
+}

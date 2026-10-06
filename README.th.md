@@ -68,6 +68,33 @@ compose จะเริ่ม jannyq, **sandbox**, SearXNG (เปิดรู�
 - คำสั่ง: `/help`, `/reset` (ลืมบทสนทนา), `/compact` (สรุปข้อความเก่าทันที)
 - ตอนนี้ตอบเป็นข้อความธรรมดา (ยังไม่แสดงผล Markdown)
 
+### Discord
+
+1. สร้าง application ที่ <https://discord.com/developers/applications> เพิ่ม **Bot** แล้วนำ token ใส่ `JANNYQ_DISCORD_TOKEN`
+2. ที่ *Bot → Privileged Gateway Intents* เปิด **MESSAGE CONTENT INTENT** ถ้าไม่เปิด Discord จะซ่อนข้อความที่ไม่ได้ mention บอท
+   บอทจะไม่ยอมเริ่มทำงานและบอกเหตุผลชัดเจน
+3. เชิญบอทด้วย scope `bot` และสิทธิ์ *View Channels*, *Send Messages*, *Read Message History*
+- **ไม่ต้องมี URL สาธารณะ**: บอทเปิดการเชื่อมต่อ gateway เอง (ต่อใหม่และ resume เมื่อหลุด)
+- ในเซิร์ฟเวอร์บอทตอบเมื่อถูก **@mention** หรือมีคน **reply ข้อความของบอท** ข้อความอื่นเก็บเป็นบริบท (`--group-context all` พร้อมชื่อผู้พูด) แต่ไม่ตอบ
+  ในข้อความส่วนตัวตอบทุกข้อความ
+- คำสั่ง: Discord เก็บ `/…` ไว้ให้ slash command จึงพิมพ์ **`!reset`**, `!help`, `!compact` (หรือ mention บอทแล้วพิมพ์ `@bot /reset`)
+- รูป PDF และไฟล์ข้อความที่แนบมาอ่านได้เหมือน Telegram และคำตอบของบอทไม่เคย ping ใคร (`allowed_mentions` ว่าง)
+
+### LINE
+
+1. ใน [LINE Developers console](https://developers.line.biz/) สร้างช่อง **Messaging API** แล้วนำ *channel secret* และ *channel access token*
+   ใส่ `JANNYQ_LINE_CHANNEL_SECRET` และ `JANNYQ_LINE_CHANNEL_TOKEN`
+2. LINE เป็นฝ่ายเรียกบอท จึงต้องมี **URL สาธารณะแบบ HTTPS**: ใช้ `docker-compose.public.yml` แล้วตั้ง *Webhook URL* เป็น
+   `https://<JANNYQ_DOMAIN>/webhook/line` (`--line-webhook-path`) เปิด *Use webhook* และใน *LINE Official Account Manager* ปิด
+   *ข้อความตอบกลับอัตโนมัติ* และ *ข้อความทักทาย* และอนุญาตให้บอทเข้ากลุ่มถ้าต้องการ
+- ทุก request ถูกตรวจกับ channel secret (HMAC-SHA256 แบบ constant time) ก่อนอ่านเนื้อหา event ที่ส่งซ้ำถูกข้าม webhook ตอบทันทีแล้วให้โมเดลทำงานทีหลัง
+  (เพราะ LINE รอไม่นาน) และ address ที่ส่ง signature ผิดซ้ำ ๆ จะถูกปฏิเสธ
+- ใน **กลุ่มและห้อง** บอทตอบเมื่อถูก **@mention** (ตัด mention ออกจากข้อความ) ข้อความอื่นเก็บเป็นบริบท ในแชทส่วนตัวตอบทุกข้อความ
+  คนในกลุ่มที่ไม่ได้อนุญาตให้ใช้โปรไฟล์จะแสดงเป็น `user`
+- **คำตอบแรกใช้ reply token ของข้อความ (ฟรี)** คำตอบถัดไปหรือคำตอบที่ช้าเกินราว 50 วินาทีจะใช้ **push** ซึ่งนับเข้าโควตาข้อความรายเดือนของบัญชี LINE
+  คำตอบยาวถูกแบ่งเป็นหลายข้อความ
+- รูปและไฟล์อ่านได้เหมือน Telegram (วิดีโอ เสียง สติกเกอร์ และตำแหน่งไม่รองรับ) ระหว่างที่โมเดลทำงานจะแสดง loading animation ของ LINE ในแชทส่วนตัว
+
 ### การเลือกโมเดล
 
 โมเดลต้องรองรับ **tool calling** ถึงจะใช้ `web_search`/`web_fetch` ได้ (Ollama: qwen3, llama3.1 ขึ้นไป ฯลฯ)
@@ -182,7 +209,7 @@ docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
 ```
 
 เปิดออกภายนอกเฉพาะ Caddy ส่วน jannyq อยู่ใน network `edge` ส่วนตัวและเชื่อ header ที่ Caddy ส่งมาเท่านั้น
-Telegram/Discord ไม่ต้องมี URL สาธารณะ ส่วน LINE, Messenger, WhatsApp (phase ถัดไป) ต้องมี และจะใช้เซิร์ฟเวอร์เดียวกันนี้
+Telegram/Discord ไม่ต้องมี URL สาธารณะ ส่วน LINE (ใช้ได้แล้ว), Messenger และ WhatsApp (phase ถัดไป) ต้องมี และจะใช้เซิร์ฟเวอร์เดียวกันนี้
 
 ## `run_command` และ sandbox
 
@@ -225,6 +252,6 @@ skill จึงมีสคริปต์ให้รันได้ และ�
 4. ✅ **รูปภาพ PDF และไฟล์ข้อความ** — vision ผ่านโมเดลหลัก, อ่าน PDF ใน sandbox (OCR กับไฟล์สแกน),
    Telegram รูป/เอกสาร/อัลบั้ม และอัปโหลดผ่าน web chat
 5. ✅ **ฐานความรู้ RAG** จากโฟลเดอร์ไฟล์ text/PDF — SQLite, ค้นแบบ vector + full-text, sync เมื่อไฟล์แก้ไข/ลบ/เปลี่ยนชื่อ
-6. Discord และ LINE
+6. ✅ **Discord และ LINE** — ช่องทางแบบ gateway และ webhook รองรับไฟล์แนบ mention และบริบทกลุ่ม
 7. Messenger และ WhatsApp
 8. Hardening และ operations

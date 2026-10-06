@@ -383,3 +383,29 @@ func TestKnowledgeSettings(t *testing.T) {
 		t.Errorf("settings of a disabled feature were validated: %v", err)
 	}
 }
+
+func TestDiscordAndLineSettings(t *testing.T) {
+	c, err := load(t, nil, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_DISCORD_TOKEN": "d.tok"})
+	if err != nil || c.DiscordToken != "d.tok" || c.DiscordAPI != "https://discord.com/api/v10" || c.DiscordGW != "wss://gateway.discord.gg" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	line := map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_LINE_CHANNEL_SECRET": "s", "JANNYQ_LINE_CHANNEL_TOKEN": "t"}
+	if c, err = load(t, []string{"--listen=:8080"}, line); err != nil || c.LinePath != "/webhook/line" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	for name, tc := range map[string]struct {
+		args []string
+		env  map[string]string
+	}{
+		"line without a listen address": {nil, line},
+		"secret without token":          {[]string{"--listen=:8080"}, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_LINE_CHANNEL_SECRET": "s"}},
+		"token without secret":          {[]string{"--listen=:8080"}, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_LINE_CHANNEL_TOKEN": "t"}},
+		"relative path":                 {[]string{"--listen=:8080", "--line-webhook-path=hook"}, line},
+		"path with ..":                  {[]string{"--listen=:8080", "--line-webhook-path=/a/../b"}, line},
+		"path under the web chat":       {[]string{"--listen=:8080", "--web", "--web-base-path=/chat/", "--line-webhook-path=/chat/line"}, line},
+	} {
+		if _, err := load(t, tc.args, tc.env); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

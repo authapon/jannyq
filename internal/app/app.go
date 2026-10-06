@@ -17,6 +17,8 @@ import (
 	"github.com/authapon/jannyq/internal/agent"
 	"github.com/authapon/jannyq/internal/channel"
 	"github.com/authapon/jannyq/internal/channel/cli"
+	"github.com/authapon/jannyq/internal/channel/discord"
+	"github.com/authapon/jannyq/internal/channel/line"
 	"github.com/authapon/jannyq/internal/channel/telegram"
 	"github.com/authapon/jannyq/internal/channel/web"
 	"github.com/authapon/jannyq/internal/config"
@@ -248,11 +250,27 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 			APIBase: cfg.TelegramAPI,
 		}, log))
 	}
+	if cfg.DiscordToken != "" {
+		channels = append(channels, discord.New(discord.Config{
+			Token: cfg.DiscordToken, APIBase: cfg.DiscordAPI, GatewayURL: cfg.DiscordGW, Version: version,
+		}, log))
+	}
+	if cfg.LineSecret != "" {
+		lc, err := line.New(line.Config{
+			ChannelSecret: cfg.LineSecret, ChannelToken: cfg.LineToken, WebhookPath: cfg.LinePath,
+			APIBase: cfg.LineAPI, DataAPIBase: cfg.LineDataAPI,
+		}, srv, log)
+		if err != nil {
+			return err
+		}
+		channels = append(channels, lc)
+		log.Info("LINE webhook ready: set the webhook URL of the channel to https://<your host>" + cfg.LinePath)
+	}
 	if cfg.CLI {
 		channels = append(channels, cli.New())
 	}
 	if len(channels) == 0 {
-		return errors.New("no channel enabled: set JANNYQ_TELEGRAM_TOKEN, use --web or use --cli")
+		return errors.New("no channel enabled: set JANNYQ_TELEGRAM_TOKEN, JANNYQ_DISCORD_TOKEN or the LINE channel settings, use --web or use --cli")
 	}
 
 	log.Info("jannyq starting",

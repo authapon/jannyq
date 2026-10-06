@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/authapon/jannyq/internal/ratelimit"
@@ -38,6 +39,9 @@ type Server struct {
 	mux     *http.ServeMux
 	limiter *ratelimit.Limiter
 	log     *slog.Logger
+
+	exemptMu sync.RWMutex
+	exempt   map[string]bool
 }
 
 // New creates a server listening on opts.Addr (e.g. ":8080").
@@ -51,6 +55,26 @@ func New(opts Options) *Server {
 		fmt.Fprintf(w, "ok %s\n", opts.Version)
 	})
 	return &Server{opts: opts, mux: mux, limiter: ratelimit.New(opts.RatePerMinute, time.Minute), log: opts.Log}
+}
+
+// ExemptFromRateLimit takes paths out of the per-address limit. It is for
+// webhooks that platforms call from a few shared addresses: they must check
+// their own signatures and limit what they refuse.
+func (s *Server) ExemptFromRateLimit(paths ...string) {
+	s.exemptMu.Lock()
+	defer s.exemptMu.Unlock()
+	if s.exempt == nil {
+		s.exempt = map[string]bool{}
+	}
+	for _, p := range paths {
+		s.exempt[p] = true
+	}
+}
+
+func (s *Server) isExempt(path string) bool {
+	s.exemptMu.RLock()
+	defer s.exemptMu.RUnlock()
+	return s.exempt[path]
 }
 
 // Mux returns the router for registering routes.
@@ -284,7 +308,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 func (s *Server) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" && !s.limiter.Allow(s.ClientKey(r)) {
+		if r.URL.Path != "/healthz" && !s.isExempt(r.URL.Path) && !s.limiter.Allow(s.ClientKey(r)) {
 			TooManyRequests(w, time.Minute)
 			return
 		}

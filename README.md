@@ -35,8 +35,8 @@ A chat bot written in Go that connects messaging platforms to **Ollama** or any
   can mirror the user's language (`--lang-mode follow-user`).
 - **Safety basics**: user allowlist, per-user rate limit, per-chat request queue, global concurrency limit,
   bounded tool-call rounds, tool output limits, Telegram token redaction in logs.
-- **Channels**: Telegram (long polling, no public URL needed), a **web chat** page, and a terminal channel
-  for local testing.
+- **Channels**: Telegram and Discord (they call out: no public URL needed), LINE (webhook, needs public HTTPS),
+  a **web chat** page, and a terminal channel for local testing.
 - **Web chat**: one self-contained page (no external scripts or fonts) served by the bot itself; replies arrive
   over server-sent events, history survives reloads, UI texts follow `--lang`, works on phones, dark mode.
 
@@ -111,6 +111,8 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--ocr-langs` | `auto` | Tesseract languages for scans, e.g. `eng+tha`; `off` disables OCR |
 | `--attach-max-mb` / `--attach-per-message` / `--attach-rate` | `20` / `5` / `10` | per file, files per message, files per user per minute |
 | `--telegram-token` | – | enables the Telegram channel (prefer the env var) |
+| `--discord-token` | – | enables the Discord channel (prefer `JANNYQ_DISCORD_TOKEN[_FILE]`; [notes](#discord-notes)) |
+| `--line-channel-secret` / `--line-channel-token` | – | enable the LINE channel; needs `--listen` and a public HTTPS URL ([notes](#line-notes)) |
 | `--cli` | `false` | enable the terminal channel |
 | `--allowed-users` | everyone | comma-separated user IDs or `channel:id` |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
@@ -132,6 +134,33 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
   `/command`. With BotFather's privacy mode on (default) it only receives those messages anyway.
 - Commands: `/help`, `/reset` (forget this chat), `/compact` (summarise older messages now).
 - Replies are plain text for now (no Markdown rendering).
+
+### Discord notes
+
+1. Create an application at <https://discord.com/developers/applications>, add a **Bot**, copy its token into `JANNYQ_DISCORD_TOKEN`.
+2. Under *Bot → Privileged Gateway Intents* switch on **MESSAGE CONTENT INTENT**. Without it Discord hides the text of messages
+   that do not mention the bot; the bot refuses to start with a clear message when the intent is missing.
+3. Invite it with the `bot` scope and the permissions *View Channels*, *Send Messages*, *Read Message History* (and *Send Messages in Threads*).
+- **No public URL**: the bot opens the gateway connection itself (it reconnects and resumes after drops).
+- In servers the bot answers when it is **@mentioned** or when someone **replies to its message**. Every other message is kept as context
+  (`--group-context all`, with speaker names) but not answered. In direct messages it answers everything.
+- Commands: Discord keeps `/…` for slash commands, so write **`!reset`**, `!help`, `!compact` (or mention the bot: `@bot /reset`).
+- Pictures, PDFs and text files attached to a message are read like on Telegram. Replies never ping anyone (`allowed_mentions` is empty).
+
+### LINE notes
+
+1. In the [LINE Developers console](https://developers.line.biz/) create a **Messaging API** channel. Copy the *channel secret* and the
+   *channel access token* into `JANNYQ_LINE_CHANNEL_SECRET` and `JANNYQ_LINE_CHANNEL_TOKEN`.
+2. LINE calls your bot, so it needs a **public HTTPS URL**: use `docker-compose.public.yml` and set the channel's *Webhook URL* to
+   `https://<JANNYQ_DOMAIN>/webhook/line` (`--line-webhook-path`), switch on *Use webhook*, and in the *LINE Official Account Manager* turn off
+   *auto-reply messages* and *greeting messages*, and allow the bot to join group chats if you want that.
+- Every request is checked against the channel secret (HMAC-SHA256, constant time) before its body is read; redelivered events are ignored;
+  the webhook answers at once and the model works afterwards, because LINE gives up quickly. Addresses that keep sending bad signatures are turned away.
+- In **groups and rooms** the bot answers when it is **@mentioned** (the mention is cut out of the text); other messages are kept as context.
+  In one-to-one chats it answers everything. People in a group who have not agreed to share their profile are shown as `user`.
+- **Replies use the free reply token** of the message for the first answer; anything after that (or an answer that takes more than about
+  50 seconds) is **pushed**, which counts against the monthly message quota of your LINE account. Long answers are split into several messages.
+- Pictures and files are read like on Telegram (videos, audio, stickers and locations are not). While the model works, LINE's loading animation is shown in one-to-one chats.
 
 ### Choosing a model
 
@@ -346,7 +375,7 @@ internal/sandbox    command executor (limits, per-chat users), HTTP server and c
 internal/skill      skills loader
 internal/audit      command audit log
 internal/ratelimit  sliding-window rate limiter
-internal/channel    Channel interface; telegram, web (page, SSE hub, sessions), cli
+internal/channel    Channel interface; telegram, discord (gateway), line (webhook), web (page, SSE hub, sessions), cli
 internal/server     shared HTTP server: rate limits, client IP, security headers
 internal/webhook    signature checks, Meta handshake, event de-duplication
 internal/router     access control, rate limits, commands
@@ -371,7 +400,7 @@ make docker
    Telegram photos/documents/albums and web uploads.
 5. ✅ **Knowledge base (RAG)** from a folder of text/PDF files: SQLite, hybrid vector + full-text search, live sync
    of edits, deletions and renames, `knowledge_search` tool.
-6. Discord and LINE.
+6. ✅ **Discord and LINE** — gateway and webhook channels with attachments, mentions and group context.
 7. Messenger and WhatsApp.
 8. Hardening and operations: per-session sandbox containers (Docker backend), metrics, backups, deployment guide.
 

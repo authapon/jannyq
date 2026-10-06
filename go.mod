@@ -3,6 +3,7 @@ module github.com/authapon/jannyq
 go 1.24.1
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	golang.org/x/image v0.30.0
 	golang.org/x/net v0.43.0

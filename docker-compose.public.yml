@@ -1,4 +1,4 @@
-# Puts the web chat (and, in later phases, platform webhooks) on the internet
+# Puts the web chat and webhook channels (LINE; later Messenger and WhatsApp) on the internet
 # behind Caddy, which obtains and renews an HTTPS certificate by itself.
 #
 #   # .env:  JANNYQ_DOMAIN=bot.example.com   (DNS must point here; ports 80/443 open)
@@ -9,6 +9,7 @@
 # their address. Telegram and Discord need none of this: they only call out.
 #
 # Set JANNYQ_WEB_ACCESS_CODE in .env unless you want the chat open to everyone.
+# LINE: set the webhook URL of your channel to https://<JANNYQ_DOMAIN>/webhook/line.
 
 services:
   caddy:

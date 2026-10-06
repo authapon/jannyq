@@ -120,6 +120,14 @@ type Config struct {
 	// Channels
 	TelegramToken string
 	TelegramAPI   string
+	DiscordToken  string
+	DiscordAPI    string
+	DiscordGW     string
+	LineSecret    string
+	LineToken     string
+	LinePath      string
+	LineAPI       string
+	LineDataAPI   string
 	CLI           bool
 
 	// Access control and limits
@@ -343,6 +351,14 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	// Channels
 	l.secret(&c.TelegramToken, "telegram-token", "Telegram bot token; enables the Telegram channel")
 	l.str(&c.TelegramAPI, "telegram-api", "https://api.telegram.org", "Telegram Bot API base URL")
+	l.secret(&c.DiscordToken, "discord-token", "Discord bot token; enables the Discord channel (turn on the MESSAGE CONTENT intent in the developer portal)")
+	l.str(&c.DiscordAPI, "discord-api", "https://discord.com/api/v10", "Discord REST API base URL")
+	l.str(&c.DiscordGW, "discord-gateway", "wss://gateway.discord.gg", "Discord gateway URL")
+	l.secret(&c.LineSecret, "line-channel-secret", "LINE channel secret, to check webhook signatures; with --line-channel-token enables the LINE channel (needs --listen and a public HTTPS URL)")
+	l.secret(&c.LineToken, "line-channel-token", "LINE channel access token")
+	l.str(&c.LinePath, "line-webhook-path", "/webhook/line", "path of the LINE webhook on the HTTP server")
+	l.str(&c.LineAPI, "line-api", "https://api.line.me", "LINE Messaging API base URL")
+	l.str(&c.LineDataAPI, "line-data-api", "https://api-data.line.me", "LINE content API base URL")
 	l.boolean(&c.CLI, "cli", false, "enable the terminal channel (chat via stdin/stdout)")
 
 	// Access control and limits
@@ -488,6 +504,20 @@ func (c *Config) validate() error {
 	}
 	if c.RateLimit < 0 {
 		bad("--rate-limit must not be negative")
+	}
+	if (c.LineSecret == "") != (c.LineToken == "") {
+		bad("the LINE channel needs both --line-channel-secret and --line-channel-token")
+	}
+	if c.LineSecret != "" {
+		if c.Listen == "" {
+			bad("the LINE channel needs --listen (LINE calls a webhook on this server; put it behind HTTPS)")
+		}
+		if !strings.HasPrefix(c.LinePath, "/") || strings.ContainsAny(c.LinePath, " ?#") || strings.Contains(c.LinePath, "..") {
+			bad("--line-webhook-path must be a plain URL path such as /webhook/line")
+		}
+		if c.Web && strings.TrimSuffix(c.WebBasePath, "/") != "" && strings.HasPrefix(c.LinePath, c.WebBasePath) {
+			bad("--line-webhook-path must not lie under --web-base-path")
+		}
 	}
 	switch c.Vision {
 	case "auto", "on", "off":
