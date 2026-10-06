@@ -218,3 +218,50 @@ func TestLoadSandbox(t *testing.T) {
 		t.Error("short token accepted")
 	}
 }
+
+func TestWebAndServerSettings(t *testing.T) {
+	base := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	with := func(extra map[string]string) map[string]string {
+		e := map[string]string{}
+		for k, v := range base {
+			e[k] = v
+		}
+		for k, v := range extra {
+			e[k] = v
+		}
+		return e
+	}
+	c, err := load(t, nil, base)
+	if err != nil || c.Web || c.HTTPRate != 300 || c.WebBasePath != "/" || c.WebMaxMessage != 4000 || c.WebRunRate != 3 || c.WebSecureCookies != "auto" {
+		t.Fatalf("defaults: %+v err=%v", c, err)
+	}
+	c, err = load(t, nil, with(map[string]string{
+		"JANNYQ_WEB": "true", "JANNYQ_LISTEN": ":8080", "JANNYQ_WEB_BASE_PATH": "/chat/", "JANNYQ_WEB_ACCESS_CODE": "letmein",
+		"JANNYQ_TRUSTED_PROXIES": "10.0.0.0/8, 172.28.0.5", "JANNYQ_WEB_ALLOWED_ORIGINS": "https://a.example, https://b.example",
+	}))
+	if err != nil || !c.Web || c.WebAccessCode != "letmein" || len(c.TrustedProxies) != 2 || len(c.WebAllowedOrigins) != 2 || c.WebBasePath != "/chat/" {
+		t.Errorf("web settings: %+v err=%v", c, err)
+	}
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		args []string
+		want string
+	}{
+		"web needs listen":    {nil, []string{"--web"}, "--listen"},
+		"bad cookie mode":     {map[string]string{"JANNYQ_LISTEN": ":1"}, []string{"--web", "--web-secure-cookies=maybe"}, "web-secure-cookies"},
+		"bad proxy":           {nil, []string{"--trusted-proxies=10.0.0.0/8,nonsense"}, "trusted-proxies"},
+		"short web secret":    {map[string]string{"JANNYQ_LISTEN": ":1"}, []string{"--web", "--web-secret=short"}, "web-secret"},
+		"huge message limit":  {map[string]string{"JANNYQ_LISTEN": ":1"}, []string{"--web", "--web-max-message=1000000"}, "web-max-message"},
+		"bad run rate":        {map[string]string{"JANNYQ_LISTEN": ":1"}, []string{"--web", "--web-run-rate=-5"}, "web-run-rate"},
+		"base path with dots": {map[string]string{"JANNYQ_LISTEN": ":1"}, []string{"--web", "--web-base-path=/../x/"}, "web-base-path"},
+		"negative http rate":  {nil, []string{"--http-rate=-1"}, "http-rate"},
+	} {
+		if _, err := load(t, tc.args, with(tc.env)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want mention of %q", name, err, tc.want)
+		}
+	}
+	// the web settings are not validated while the web chat is off
+	if _, err := load(t, []string{"--web-secure-cookies=maybe"}, base); err != nil {
+		t.Errorf("web settings checked although --web is off: %v", err)
+	}
+}

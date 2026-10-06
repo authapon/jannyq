@@ -1,0 +1,20 @@
+# Reverse proxy with automatic HTTPS (Let's Encrypt) in front of jannyq.
+# Used by docker-compose.public.yml; JANNYQ_DOMAIN must point at this server
+# and ports 80 and 443 must be reachable from the internet.
+{$JANNYQ_DOMAIN} {
+	# The event stream is sent with "Cache-Control: no-transform", which Caddy
+	# respects, and every chunk is flushed (below), so replies are never held back.
+	encode zstd gzip
+
+	# flush_interval -1 sends every chunk at once, which server-sent events need.
+	# Caddy adds X-Forwarded-For/-Proto/-Host; jannyq believes them only from
+	# this container's network (JANNYQ_TRUSTED_PROXIES).
+	reverse_proxy jannyq:8080 {
+		flush_interval -1
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+	}
+}

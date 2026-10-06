@@ -148,6 +148,7 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 		IsGroup: in.IsGroup,
 		Channel: in.Channel,
 		UserID:  in.UserID,
+		Origin:  in.Origin,
 	})
 	switch {
 	case errors.Is(err, agent.ErrEmptyResponse):

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Chat</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1 id="title">Chat</h1>
+    <button id="reset" type="button" hidden></button>
+  </header>
+
+  <form id="login" hidden autocomplete="off">
+    <p id="login-prompt"></p>
+    <div class="row">
+      <input id="code" type="password" autocomplete="off" required>
+      <button type="submit" id="login-submit"></button>
+    </div>
+    <p id="login-error" role="alert"></p>
+  </form>
+
+  <main id="chat" hidden>
+    <div id="messages" role="log" aria-live="polite"></div>
+    <div id="status" aria-live="polite"></div>
+    <form id="composer" autocomplete="off">
+      <textarea id="input" rows="1" enterkeyhint="send"></textarea>
+      <button id="send" type="submit"></button>
+    </form>
+  </main>
+</div>
+<script src="app.js" defer></script>
+</body>
+</html>

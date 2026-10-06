@@ -30,6 +30,8 @@ services:
       JANNYQ_RUN_COMMAND: ${JANNYQ_RUN_COMMAND:-sandbox}
       JANNYQ_SANDBOX_URL: http://sandbox:9090
       JANNYQ_SKILLS_DIR: /skills
+      # The web chat is off here; docker-compose.public.yml turns it on behind HTTPS.
+      JANNYQ_WEB: ${JANNYQ_WEB:-false}
     volumes:
       - jannyq-data:/data
       - ./skills:/skills:ro
@@ -43,10 +45,12 @@ services:
     networks:
       - default
       - sandbox
-    # Webhook-based channels (LINE, Messenger, WhatsApp, webbot) arrive in later
-    # phases and need a public HTTPS URL. Telegram and Discord do not.
+    # The web chat and webhook-based channels (LINE, Messenger, WhatsApp) need a public
+    # HTTPS URL: use docker-compose.public.yml, which adds Caddy. To try the web chat on
+    # this machine only, set JANNYQ_WEB=true in .env and uncomment:
     # ports:
-    #   - "8080:8080"
+    #   - "127.0.0.1:8080:8080"
+    # Telegram and Discord need none of this: they only call out.
     security_opt:
       - no-new-privileges:true
     cap_drop:

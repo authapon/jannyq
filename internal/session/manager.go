@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -28,9 +30,24 @@ type Manager struct {
 
 type entry struct {
 	sem      chan struct{} // capacity 1: held while a request runs
+	openMu   sync.Mutex    // guards s while it is being opened
 	s        *Session
 	refs     int // running + waiting requests; guarded by Manager.mu
 	lastUsed time.Time
+}
+
+// session opens the chat's database on first use.
+func (e *entry) session(channel, chatID, base string) (*Session, error) {
+	e.openMu.Lock()
+	defer e.openMu.Unlock()
+	if e.s == nil {
+		s, err := openSession(channel, chatID, sessionDir(base, channel, chatID))
+		if err != nil {
+			return nil, err
+		}
+		e.s = s
+	}
+	return e.s, nil
 }
 
 // NewManager stores sessions under dir. maxOpen bounds simultaneously open
@@ -74,14 +91,43 @@ func (m *Manager) With(ctx context.Context, channel, chatID string, fn func(*Ses
 	}
 	defer func() { <-e.sem }()
 
-	if e.s == nil {
-		s, err := openSession(channel, chatID, sessionDir(m.dir, channel, chatID))
-		if err != nil {
-			return err
-		}
-		e.s = s
+	s, err := e.session(channel, chatID, m.dir)
+	if err != nil {
+		return err
 	}
-	return fn(e.s)
+	return fn(s)
+}
+
+// Exists reports whether the chat has ever stored anything, without creating it.
+func (m *Manager) Exists(channel, chatID string) bool {
+	_, err := os.Stat(filepath.Join(sessionDir(m.dir, channel, chatID), "session.db"))
+	return err == nil
+}
+
+// Peek runs fn with read access to the chat's session without waiting for a
+// running request or counting towards the queue limit. fn may only call
+// read-only methods (Recent, Messages, Summary, Count).
+func (m *Manager) Peek(channel, chatID string, fn func(*Session) error) error {
+	key := channel + "\x00" + chatID
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrClosed
+	}
+	e := m.entries[key]
+	if e == nil {
+		e = &entry{sem: make(chan struct{}, 1)}
+		m.entries[key] = e
+	}
+	e.refs++
+	m.mu.Unlock()
+	defer m.release(e)
+
+	s, err := e.session(channel, chatID, m.dir)
+	if err != nil {
+		return err
+	}
+	return fn(s)
 }
 
 func (m *Manager) release(e *entry) {

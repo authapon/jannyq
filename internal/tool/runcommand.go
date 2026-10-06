@@ -21,6 +21,12 @@ type RunCommand struct {
 	Info *sandbox.Info
 	// Limiter limits commands per user; nil means unlimited.
 	Limiter *ratelimit.Limiter
+	// ChannelLimiters replace Limiter for the named channels. They are keyed
+	// by the user's Origin (client address) when there is one, so anonymous
+	// visitors cannot get fresh quota by starting new sessions.
+	ChannelLimiters map[string]*ratelimit.Limiter
+	// DisabledChannels may not run commands at all.
+	DisabledChannels map[string]bool
 	// Audit records every command; nil disables auditing.
 	Audit *audit.Logger
 	Log   *slog.Logger
@@ -84,7 +90,17 @@ func (r *RunCommand) Execute(ctx context.Context, cc CallContext, raw []byte) (s
 	if strings.TrimSpace(args.Command) == "" {
 		return "", errors.New("command is required")
 	}
-	if r.Limiter != nil && !r.Limiter.Allow(cc.Channel+":"+cc.UserID) {
+	if r.DisabledChannels[cc.Channel] {
+		return "", errors.New("running commands is not available in this chat channel")
+	}
+	limiter, key := r.Limiter, cc.Channel+":"+cc.UserID
+	if l, ok := r.ChannelLimiters[cc.Channel]; ok {
+		limiter = l
+		if cc.Origin != "" {
+			key = cc.Channel + ":" + cc.Origin
+		}
+	}
+	if limiter != nil && !limiter.Allow(key) {
 		return "", errors.New("rate limit reached: this user is running too many commands; ask them to wait a minute")
 	}
 

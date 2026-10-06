@@ -1,0 +1,58 @@
+# Puts the web chat (and, in later phases, platform webhooks) on the internet
+# behind Caddy, which obtains and renews an HTTPS certificate by itself.
+#
+#   # .env:  JANNYQ_DOMAIN=bot.example.com   (DNS must point here; ports 80/443 open)
+#   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+#
+# Only Caddy is published. jannyq's port stays on the private `edge` network and
+# believes X-Forwarded-* headers solely from that network, so visitors cannot fake
+# their address. Telegram and Discord need none of this: they only call out.
+#
+# Set JANNYQ_WEB_ACCESS_CODE in .env unless you want the chat open to everyone.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      JANNYQ_DOMAIN: ${JANNYQ_DOMAIN:?set JANNYQ_DOMAIN in .env (the public host name)}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+    depends_on:
+      - jannyq
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  jannyq:
+    environment:
+      JANNYQ_WEB: "true"
+      JANNYQ_TRUSTED_PROXIES: 172.31.250.0/24
+    networks:
+      - default
+      - sandbox
+      - edge
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+volumes:
+  caddy-data:
+  caddy-config:

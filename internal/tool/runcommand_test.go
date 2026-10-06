@@ -217,3 +217,50 @@ func TestLoadSkillTool(t *testing.T) {
 		}
 	}
 }
+
+func TestRunCommandChannelPolicy(t *testing.T) {
+	fr := &fakeRunner{res: &sandbox.Result{}}
+	r := &RunCommand{
+		Runner:           fr,
+		Limiter:          ratelimit.New(100, time.Minute),
+		ChannelLimiters:  map[string]*ratelimit.Limiter{"web": ratelimit.New(2, time.Minute)},
+		DisabledChannels: map[string]bool{"blocked": true},
+	}
+	run := func(c CallContext) error {
+		_, err := r.Execute(context.Background(), c, []byte(`{"command":"true"}`))
+		return err
+	}
+
+	web := CallContext{SessionKey: "web:s1", Channel: "web", UserID: "s1", Origin: "203.0.113.5"}
+	if run(web) != nil || run(web) != nil {
+		t.Fatal("the first two web commands must run")
+	}
+	if err := run(web); err == nil || !strings.Contains(err.Error(), "rate limit") {
+		t.Errorf("third web command: %v", err)
+	}
+	// a new web session from the same address shares the quota
+	web2 := CallContext{SessionKey: "web:s2", Channel: "web", UserID: "s2", Origin: "203.0.113.5"}
+	if err := run(web2); err == nil {
+		t.Error("starting a new session reset the quota")
+	}
+	// another address has its own
+	web3 := CallContext{SessionKey: "web:s3", Channel: "web", UserID: "s3", Origin: "203.0.113.6"}
+	if err := run(web3); err != nil {
+		t.Errorf("another address: %v", err)
+	}
+	// other channels use the general limiter, keyed by user
+	tg := CallContext{SessionKey: "telegram:1", Channel: "telegram", UserID: "7"}
+	for i := 0; i < 5; i++ {
+		if err := run(tg); err != nil {
+			t.Fatalf("telegram command %d: %v", i, err)
+		}
+	}
+	// disabled channels never reach the sandbox
+	before := len(fr.reqs)
+	if err := run(CallContext{Channel: "blocked", UserID: "u"}); err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Errorf("disabled channel: %v", err)
+	}
+	if len(fr.reqs) != before {
+		t.Error("a command from a disabled channel was run")
+	}
+}

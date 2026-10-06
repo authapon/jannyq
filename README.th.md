@@ -3,8 +3,9 @@
 แชทบอทที่เขียนด้วยภาษา Go เชื่อมต่อแพลตฟอร์มแชทกับโมเดลของ **Ollama** หรือ API ที่เข้ากันได้กับ **OpenAI**
 พร้อม tool calling สำหรับค้นเว็บและอ่านหน้าเว็บ
 
-> **สถานะ: Phase 2** — Telegram และ terminal, `web_search`, `web_fetch`, ความจำแยกตามแชทพร้อมสรุปอัตโนมัติ,
-> **`run_command` ใน sandbox แยก** และ **skills** ดู [แผนงาน](#แผนงาน) สำหรับสิ่งที่จะตามมา
+> **สถานะ: Phase 3** — Telegram, **web chat** และ terminal, `web_search`, `web_fetch`, ความจำแยกตามแชท,
+> `run_command` ใน sandbox แยก, skills และ HTTP server กลางพร้อม **HTTPS ผ่าน Caddy**
+> ดู [แผนงาน](#แผนงาน) สำหรับสิ่งที่จะตามมา
 
 ## ความสามารถ
 
@@ -69,6 +70,36 @@ compose จะเริ่ม jannyq, **sandbox**, SearXNG (เปิดรู�
 ถ้าโมเดลปฏิเสธ tools ระบบจะบันทึกคำเตือนและคุยต่อโดยไม่ใช้ tools
 และควรตั้ง `--context-size` เสมอเมื่อใช้ Ollama เพราะค่าเริ่มต้นของ Ollama เล็กมาก
 
+## Web chat
+
+```sh
+jannyq --web --listen :8080 --llm-model qwen3:8b      # แล้วเปิด http://localhost:8080/
+```
+
+ผู้เยี่ยมชมแต่ละคนได้คุกกี้ session ที่เซ็นลายเซ็นและเป็น `HttpOnly` พร้อมบทสนทนาส่วนตัวของตัวเอง
+หน้าเว็บทั้งหมดมาจากตัวบอทเอง ใต้ Content-Security-Policy ที่เข้มงวด (ไม่มี script ฝังหรือจากภายนอก)
+ข้อความตอบกลับสร้างจาก DOM node ไม่ใช่สตริง HTML จึงแสดง HTML ที่แฝงมาเป็นข้อความธรรมดา และทำลิงก์ให้กดได้เฉพาะ `http(s)`
+
+- **ใครใช้ได้**: ทุกคน หรือเฉพาะผู้ที่รู้ `--web-access-code` (จำกัดความถี่ตามที่อยู่ เปลี่ยนรหัสแล้วทุกคนต้องเข้าใหม่)
+- **กัน cross-site**: `POST` ต้องเป็น `application/json` และ Origin ตรงกับเว็บ, คุกกี้ `SameSite=Lax`
+- **จำกัดต่อที่อยู่ IP**: ข้อความต่อนาที, session ใหม่ต่อชั่วโมง, จำนวน stream, ข้อความที่ประมวลผลพร้อมกัน
+  (การสร้าง session ใหม่ **ไม่** รีเซ็ตขีดจำกัดเหล่านี้) และ `run_command` จากเว็บมี quota ที่เข้มกว่า (`--web-run-rate`)
+- **ที่อยู่ client จริง**: เชื่อ `X-Forwarded-For` เฉพาะจาก `--trusted-proxies`
+
+ถ้าไม่ตั้งรหัสเข้าใช้ ใครก็ตามที่เข้าถึงได้จะแชทได้ และทุกข้อความใช้เวลาของโมเดล จึงควรตั้งรหัสหรือคง rate limit ให้ต่ำ
+
+## เปิดใช้งานสาธารณะ (HTTPS)
+
+`docker-compose.public.yml` เพิ่ม [Caddy](https://caddyserver.com/) ที่ขอและต่ออายุใบรับรอง Let's Encrypt เอง และเปิด web chat:
+
+```sh
+# .env: JANNYQ_DOMAIN=bot.example.com  JANNYQ_WEB_ACCESS_CODE=...   (DNS ชี้มาที่เซิร์ฟเวอร์ เปิดพอร์ต 80/443)
+docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+```
+
+เปิดออกภายนอกเฉพาะ Caddy ส่วน jannyq อยู่ใน network `edge` ส่วนตัวและเชื่อ header ที่ Caddy ส่งมาเท่านั้น
+Telegram/Discord ไม่ต้องมี URL สาธารณะ ส่วน LINE, Messenger, WhatsApp (phase ถัดไป) ต้องมี และจะใช้เซิร์ฟเวอร์เดียวกันนี้
+
 ## `run_command` และ sandbox
 
 การให้โมเดลรันคำสั่ง shell ให้ใครก็ตามที่แชทเข้ามาเป็นเรื่องอันตราย (โมเดลถูกหลอกได้ และข้อความจากเว็บก็พยายามสั่งโมเดลได้)
@@ -106,7 +137,7 @@ skill จึงมีสคริปต์ให้รันได้ และ�
 1. ✅ **แกนหลัก** — agent loop, Ollama/OpenAI, ความจำ SQLite ต่อแชท + compaction, `web_search`, `web_fetch`,
    Telegram, CLI, Docker
 2. ✅ `run_command` ใน sandbox แยก (limit/quota/audit log) และตัวโหลด skills
-3. Webbot (หน้าเว็บ) และ webhook server กลาง
+3. ✅ Web chat และ webhook server กลาง (ตรวจ signature, rate limit, HTTPS ด้วย Caddy)
 4. รูปภาพและ PDF (vision ใช้โมเดลหลัก, สกัดข้อความ PDF พร้อม OCR สำรอง)
 5. ฐานความรู้ RAG จากโฟลเดอร์ไฟล์ text/PDF — SQLite, ค้นแบบ vector + full-text, sync เมื่อไฟล์แก้ไข/ลบ
 6. Discord และ LINE

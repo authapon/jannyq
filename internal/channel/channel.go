@@ -30,7 +30,11 @@ type Incoming struct {
 	// HasAttachment is true when the message carried a file, photo, etc.
 	// that the channel could not turn into text.
 	HasAttachment bool
-	Responder     Responder
+	// Origin identifies where an anonymous user comes from (the client IP of
+	// the web chat), so that limits cannot be dodged by creating new
+	// identities. Empty for platforms with real accounts.
+	Origin    string
+	Responder Responder
 }
 
 // Sink receives incoming messages. It blocks until the message has been

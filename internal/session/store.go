@@ -137,6 +137,43 @@ func (s *Session) Messages(ctx context.Context) ([]Stored, error) {
 	return sanitizeHistory(all), nil
 }
 
+// Turn is one user message or assistant reply, as shown to people.
+type Turn struct {
+	Role string // "user" or "assistant"
+	Text string
+}
+
+// Recent returns up to n of the latest conversational messages, oldest
+// first, leaving out tool calls and tool results.
+func (s *Session) Recent(ctx context.Context, n int) ([]Turn, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT role, content FROM messages
+		 WHERE role = 'user' OR (role = 'assistant' AND content != '')
+		 ORDER BY id DESC LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var turns []Turn
+	for rows.Next() {
+		var t Turn
+		if err := rows.Scan(&t.Role, &t.Text); err != nil {
+			return nil, err
+		}
+		turns = append(turns, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(turns)-1; i < j; i, j = i+1, j-1 {
+		turns[i], turns[j] = turns[j], turns[i]
+	}
+	return turns, nil
+}
+
 // Count returns the number of conversational messages (user messages and
 // non-empty assistant replies), ignoring tool plumbing.
 func (s *Session) Count(ctx context.Context) (int, error) {

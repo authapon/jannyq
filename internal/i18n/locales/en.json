@@ -8,5 +8,16 @@
   "error_generic": "Sorry, something went wrong while processing your message. Please try again.",
   "empty_response": "Sorry, I couldn't come up with a reply. Could you rephrase your message?",
   "unsupported_attachment": "Sorry, I can't read attachments yet. Please send your message as text.",
-  "not_allowed": "Sorry, you are not allowed to use this bot."
+  "not_allowed": "Sorry, you are not allowed to use this bot.",
+  "web_placeholder": "Type a message…",
+  "web_send": "Send",
+  "web_new_chat": "New chat",
+  "web_typing": "Typing…",
+  "web_reconnecting": "Connection lost. Reconnecting…",
+  "web_error": "Something went wrong. Please try again.",
+  "web_too_long": "Your message is too long.",
+  "web_rate_limited": "You are going too fast. Please wait a moment.",
+  "web_code_prompt": "Enter the access code to start chatting.",
+  "web_code_submit": "Continue",
+  "web_code_wrong": "That code is not correct."
 }

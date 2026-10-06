@@ -18,6 +18,7 @@ import (
 	"github.com/authapon/jannyq/internal/channel"
 	"github.com/authapon/jannyq/internal/channel/cli"
 	"github.com/authapon/jannyq/internal/channel/telegram"
+	"github.com/authapon/jannyq/internal/channel/web"
 	"github.com/authapon/jannyq/internal/config"
 	"github.com/authapon/jannyq/internal/i18n"
 	"github.com/authapon/jannyq/internal/llm"
@@ -93,14 +94,25 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		if cfg.SkillsDir != "" && cfg.RunCommand == "sandbox" {
 			skillsPath = cfg.SkillsSandboxPath
 		}
-		tools.Register(&tool.RunCommand{
+		rc := &tool.RunCommand{
 			Runner:     runner.runner,
 			Info:       runner.info,
 			Limiter:    ratelimit.New(cfg.RunRate, time.Minute),
 			Audit:      runner.audit,
 			Log:        log,
 			SkillsPath: skillsPath,
-		})
+		}
+		if cfg.Web {
+			// Web visitors are anonymous, so their commands get a tighter,
+			// per-address quota (or none at all).
+			switch {
+			case cfg.WebRunRate == 0:
+				rc.DisabledChannels = map[string]bool{"web": true}
+			case cfg.WebRunRate > 0:
+				rc.ChannelLimiters = map[string]*ratelimit.Limiter{"web": ratelimit.New(cfg.WebRunRate, time.Minute)}
+			}
+		}
+		tools.Register(rc)
 	}
 	var skills *skill.Store
 	if cfg.SkillsDir != "" {
@@ -155,7 +167,49 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		rt.SetWorkspaceReset(runner.runner.Reset)
 	}
 
+	var srv *server.Server
+	if cfg.Listen != "" {
+		proxies, err := server.ParseProxies(cfg.TrustedProxies)
+		if err != nil {
+			return fmt.Errorf("trusted proxies: %w", err)
+		}
+		srv = server.New(server.Options{
+			Addr: cfg.Listen, Version: version, TrustedProxies: proxies, RatePerMinute: cfg.HTTPRate, Log: log,
+		})
+	}
+
 	var channels []channel.Channel
+	if cfg.Web {
+		secret, err := webSecret(cfg)
+		if err != nil {
+			return err
+		}
+		title := cfg.WebTitle
+		if title == "" {
+			title = cfg.BotName
+		}
+		wc, err := web.New(web.Config{
+			BasePath:           cfg.WebBasePath,
+			Title:              title,
+			Lang:               tr.Lang(),
+			AccessCode:         cfg.WebAccessCode,
+			Secret:             secret,
+			MaxMessage:         cfg.WebMaxMessage,
+			IPRate:             cfg.WebIPRate,
+			NewSessionsPerHour: cfg.WebSessionsPerHour,
+			SecureCookies:      cfg.WebSecureCookies,
+			AllowedOrigins:     cfg.WebAllowedOrigins,
+			Strings:            tr.Prefixed("web_"),
+			History:            webHistory{sessions},
+		}, srv, log)
+		if err != nil {
+			return err
+		}
+		channels = append(channels, wc)
+		if cfg.WebAccessCode == "" {
+			log.Warn("the web chat is open to anyone who can reach it (no --web-access-code)")
+		}
+	}
 	if cfg.TelegramToken != "" {
 		channels = append(channels, telegram.New(telegram.Config{
 			Token:   cfg.TelegramToken,
@@ -166,7 +220,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		channels = append(channels, cli.New())
 	}
 	if len(channels) == 0 {
-		return errors.New("no channel enabled: set JANNYQ_TELEGRAM_TOKEN or use --cli")
+		return errors.New("no channel enabled: set JANNYQ_TELEGRAM_TOKEN, use --web or use --cli")
 	}
 
 	log.Info("jannyq starting",
@@ -179,8 +233,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 
 	var wg sync.WaitGroup
 	errc := make(chan error, len(channels)+1)
-	if cfg.Listen != "" {
-		srv := server.New(cfg.Listen, version, log)
+	if srv != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

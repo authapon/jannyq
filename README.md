@@ -3,9 +3,9 @@
 A chat bot written in Go that connects messaging platforms to **Ollama** or any
 **OpenAI-compatible** model, with tool calling for web search and web page reading.
 
-> **Status: Phase 2.** Telegram + terminal channels, `web_search`, `web_fetch`, per-chat memory with
-> automatic compaction, **`run_command` in an isolated sandbox** and **skills**. See the
-> [roadmap](#roadmap) for what comes next. 🇹🇭 [อ่านภาษาไทย](README.th.md)
+> **Status: Phase 3.** Telegram, **web chat** and terminal channels, `web_search`, `web_fetch`, per-chat
+> memory with automatic compaction, `run_command` in an isolated sandbox, skills, and a shared HTTP server
+> with **HTTPS via Caddy**. See the [roadmap](#roadmap) for what comes next. 🇹🇭 [อ่านภาษาไทย](README.th.md)
 
 ## Features
 
@@ -27,7 +27,10 @@ A chat bot written in Go that connects messaging platforms to **Ollama** or any
   can mirror the user's language (`--lang-mode follow-user`).
 - **Safety basics**: user allowlist, per-user rate limit, per-chat request queue, global concurrency limit,
   bounded tool-call rounds, tool output limits, Telegram token redaction in logs.
-- **Channels**: Telegram (long polling, no public URL needed) and a terminal channel for local testing.
+- **Channels**: Telegram (long polling, no public URL needed), a **web chat** page, and a terminal channel
+  for local testing.
+- **Web chat**: one self-contained page (no external scripts or fonts) served by the bot itself; replies arrive
+  over server-sent events, history survives reloads, UI texts follow `--lang`, works on phones, dark mode.
 
 ## Quick start
 
@@ -97,7 +100,14 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--rate-limit` | `20` | messages per user per minute |
 | `--system-prompt[-file]` | – | extra instructions for the model |
 | `--fetch-allow-private` | `false` | let `web_fetch` reach private addresses (**disables SSRF protection**) |
-| `--listen` | – | HTTP address for `/healthz` (the Docker image sets `:8080`) |
+| `--listen` | – | HTTP address for the web chat, webhooks and `/healthz` (the Docker image sets `:8080`) |
+| `--web` | `false` | serve the web chat (needs `--listen`) |
+| `--web-access-code` | – | visitors must enter this code first; empty = open to everyone |
+| `--web-base-path` | `/` | where the chat lives, e.g. `/chat/` |
+| `--web-ip-rate` | `30` | web messages per client address per minute |
+| `--web-run-rate` | `3` | `run_command` calls per address per minute from the web (`0` = off there, `-1` = use `--run-rate`) |
+| `--trusted-proxies` | – | IPs/CIDRs of reverse proxies whose `X-Forwarded-*` headers are believed |
+| `--http-rate` | `300` | HTTP requests per client address per minute |
 
 ### Telegram notes
 
@@ -111,6 +121,54 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 The model must support **tool calling** for `web_search`/`web_fetch` to work (for Ollama: qwen3, llama3.1+,
 mistral-nemo, …). If a model rejects tools, jannyq logs a warning and keeps chatting without them.
 Always set `--context-size` for Ollama: its default context is small and long pages would be silently cut.
+
+## Web chat
+
+```sh
+jannyq --web --listen :8080 --llm-model qwen3:8b      # then open http://localhost:8080/
+```
+
+Visitors get a signed, `HttpOnly` session cookie and their own private conversation (stored like any other
+chat). Everything the page needs is served by the bot with a strict Content-Security-Policy: no inline or
+third-party scripts. Replies are drawn from DOM nodes, never HTML strings, so markup in a reply (or in what a
+visitor types) is shown as text; only `http(s)` links are made clickable. `/reset` or the **New chat** button
+starts over.
+
+| Protection | Details |
+|---|---|
+| Who may chat | Anyone, or only visitors who know `--web-access-code` (constant-time check, throttled per address; changing the code signs everyone out) |
+| Cross-site requests | `POST`s need `Content-Type: application/json` and a same-origin `Origin`/`Sec-Fetch-Site` (extra origins via `--web-allowed-origins`); cookies are `SameSite=Lax` |
+| Limits per address | Messages per minute, new anonymous sessions per hour, open streams, in-flight messages; creating a new session does **not** reset them. IPv6 clients are limited per `/64`, since one subscriber controls a whole `/64` |
+| Commands | `run_command` from the web has its own, tighter per-address quota (`--web-run-rate`) |
+| Message size | `--web-max-message` characters; request bodies are capped at 64 KB |
+| Real client address | `X-Forwarded-For` is believed only from `--trusted-proxies`, using the right-most untrusted entry |
+
+Without an access code the chat is open to anyone who can reach it, and every message costs model time:
+put it behind the access code (12+ characters; guesses are throttled but not impossible to distribute) or keep
+the rate limits low. Memory use is bounded (replies kept for reconnecting browsers are capped per chat, idle
+chats are forgotten after 30 minutes), and a chat's database file is only created when its first message is sent.
+
+## Public deployment (HTTPS)
+
+`docker-compose.public.yml` adds [Caddy](https://caddyserver.com/), which gets and renews a Let's Encrypt
+certificate by itself, and turns the web chat on:
+
+```sh
+# .env: JANNYQ_DOMAIN=bot.example.com  JANNYQ_WEB_ACCESS_CODE=...   (DNS → this server, ports 80/443 open)
+docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+```
+
+Only Caddy is published. jannyq sits on a private `edge` network with Caddy and trusts its forwarding headers
+only from there. Telegram and Discord never need a public URL; LINE, Messenger and WhatsApp (later phases)
+do, and will use this same server.
+
+## Webhook toolkit (for channel authors)
+
+`internal/webhook` provides what every webhook channel needs, already tested: bounded body reading,
+`VerifyHex` (Meta's `X-Hub-Signature-256`) and `VerifyBase64` (LINE's `X-Line-Signature`) in constant time,
+`Signed(...)` to run a handler only after the signature checks out, `MetaChallenge` for the subscription
+handshake, and `Dedupe` to ignore redelivered events. Channels receive the shared `server.Server`
+(rate limiting, client address detection, security headers) and register their routes on its mux.
 
 ## `run_command` and the sandbox
 
@@ -148,8 +206,9 @@ and exists only for private experiments. Also know that:
 - The `/tmp` tmpfs is shared; leftovers of a workspace's user are removed when its user id is recycled.
 - Disk use grows with the number of chats (256 MB each by default, idle ones removed after 7 days): put
   `/work` on a size-limited volume.
-- The sandbox shares an internal network with the bot, which today only serves `/healthz`. Later phases add
-  webhook endpoints; those will be served on a separate listener.
+- The sandbox shares an internal network with the bot, whose HTTP port also serves the web chat. Commands
+  have no internet but can reach that port; it needs no secret to use, so it only exposes what the public
+  can already see. Don't add privileged endpoints to it.
 
 ## Skills
 
@@ -180,7 +239,9 @@ internal/sandbox    command executor (limits, per-chat users), HTTP server and c
 internal/skill      skills loader
 internal/audit      command audit log
 internal/ratelimit  sliding-window rate limiter
-internal/channel    Channel interface; telegram, cli
+internal/channel    Channel interface; telegram, web (page, SSE hub, sessions), cli
+internal/server     shared HTTP server: rate limits, client IP, security headers
+internal/webhook    signature checks, Meta handshake, event de-duplication
 internal/router     access control, rate limits, commands
 internal/i18n       embedded message catalogs (en, th)
 ```
@@ -198,7 +259,7 @@ make docker
 1. ✅ **Core** — agent loop, Ollama/OpenAI, per-chat SQLite memory + compaction, `web_search`, `web_fetch`,
    Telegram, CLI, Docker.
 2. ✅ **`run_command` + skills** — sandbox executor with per-chat users, limits, quotas and audit log; skills loader.
-3. Web chat page and the shared webhook server (signature checks, rate limits, HTTPS profile).
+3. ✅ **Web chat** and the shared webhook server (signature checks, rate limits, HTTPS with Caddy).
 4. Images and PDFs (vision uses the main model; PDF text extraction with OCR fallback).
 5. Knowledge base (RAG) from a folder of text/PDF files: SQLite, hybrid vector + full-text search, live sync
    of edits and deletions, `knowledge_search` tool.

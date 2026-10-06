@@ -61,6 +61,7 @@ type Input struct {
 	IsGroup bool
 	Channel string
 	UserID  string
+	Origin  string // see channel.Incoming.Origin
 }
 
 // Agent drives conversations.
@@ -127,6 +128,7 @@ func (a *Agent) Reply(ctx context.Context, s *session.Session, in Input) (string
 		Channel:    in.Channel,
 		UserID:     in.UserID,
 		UserName:   in.Sender,
+		Origin:     in.Origin,
 		Lang:       a.cfg.Lang,
 	}
 

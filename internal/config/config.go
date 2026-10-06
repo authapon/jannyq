@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -61,6 +62,21 @@ type Config struct {
 	AuditLog          string
 	SkillsDir         string
 	SkillsSandboxPath string
+
+	// HTTP server and web chat
+	TrustedProxies     []string
+	HTTPRate           int
+	Web                bool
+	WebBasePath        string
+	WebTitle           string
+	WebAccessCode      string
+	WebSecret          string
+	WebMaxMessage      int
+	WebIPRate          int
+	WebSessionsPerHour int
+	WebSecureCookies   string
+	WebAllowedOrigins  []string
+	WebRunRate         int
 
 	// Channels
 	TelegramToken string
@@ -187,7 +203,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	fs.SetOutput(stderr)
 	l := &loader{fs: fs, env: env, prefix: "JANNYQ_"}
 
-	var allowed, systemPromptFile string
+	var allowed, systemPromptFile, proxies, origins string
 
 	// General
 	l.str(&c.Lang, "lang", "en", "main language for messages and replies (en, th, ...)")
@@ -233,6 +249,21 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.str(&c.SkillsDir, "skills-dir", "", "directory of skills (folders with SKILL.md); empty disables skills")
 	l.str(&c.SkillsSandboxPath, "skills-sandbox-path", "/skills", "where the skills directory is mounted inside the sandbox; empty if it is not")
 
+	// HTTP server and web chat
+	l.str(&proxies, "trusted-proxies", "", "comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-* headers are believed")
+	l.integer(&c.HTTPRate, "http-rate", 300, "HTTP requests per client address per minute; 0 = unlimited")
+	l.boolean(&c.Web, "web", false, "enable the web chat page (needs --listen)")
+	l.str(&c.WebBasePath, "web-base-path", "/", "URL path where the web chat is served, e.g. / or /chat/")
+	l.str(&c.WebTitle, "web-title", "", "title of the web chat (default: --bot-name)")
+	l.secret(&c.WebAccessCode, "web-access-code", "code visitors must enter before chatting; empty lets anyone chat")
+	l.secret(&c.WebSecret, "web-secret", "key that signs web sessions (default: generated once into <data-dir>/web_secret)")
+	l.integer(&c.WebMaxMessage, "web-max-message", 4000, "longest web chat message in characters")
+	l.integer(&c.WebIPRate, "web-ip-rate", 30, "web chat messages per client address per minute")
+	l.integer(&c.WebSessionsPerHour, "web-sessions-per-hour", 20, "new anonymous web sessions per client address per hour")
+	l.str(&c.WebSecureCookies, "web-secure-cookies", "auto", "Secure flag of the session cookie: auto (when served over HTTPS), on or off")
+	l.str(&origins, "web-allowed-origins", "", "comma-separated extra origins allowed to post to the web chat, e.g. https://example.com")
+	l.integer(&c.WebRunRate, "web-run-rate", 3, "run_command calls per client address per minute from the web chat; 0 disables it there, -1 uses --run-rate")
+
 	// Channels
 	l.secret(&c.TelegramToken, "telegram-token", "Telegram bot token; enables the Telegram channel")
 	l.str(&c.TelegramAPI, "telegram-api", "https://api.telegram.org", "Telegram Bot API base URL")
@@ -255,6 +286,8 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 		return nil, errors.Join(l.errs...)
 	}
 
+	c.TrustedProxies = splitList(proxies)
+	c.WebAllowedOrigins = splitList(origins)
 	for _, u := range strings.Split(allowed, ",") {
 		if u = strings.TrimSpace(u); u != "" {
 			c.AllowedUsers = append(c.AllowedUsers, u)
@@ -337,6 +370,39 @@ func (c *Config) validate() error {
 	if c.RunRate < 0 {
 		bad("--run-rate must not be negative")
 	}
+	for _, p := range c.TrustedProxies {
+		if _, err := netip.ParsePrefix(p); err != nil {
+			if _, err := netip.ParseAddr(p); err != nil {
+				bad("--trusted-proxies: %q is not an IP address or CIDR range", p)
+			}
+		}
+	}
+	if c.HTTPRate < 0 {
+		bad("--http-rate must not be negative")
+	}
+	if c.Web {
+		if c.Listen == "" {
+			bad("--web needs --listen (for example --listen :8080)")
+		}
+		if c.WebSecureCookies != "auto" && c.WebSecureCookies != "on" && c.WebSecureCookies != "off" {
+			bad("--web-secure-cookies must be auto, on or off")
+		}
+		if c.WebMaxMessage < 1 || c.WebMaxMessage > 20000 {
+			bad("--web-max-message must be between 1 and 20000")
+		}
+		if c.WebIPRate < 1 || c.WebSessionsPerHour < 1 {
+			bad("--web-ip-rate and --web-sessions-per-hour must be at least 1")
+		}
+		if c.WebRunRate < -1 {
+			bad("--web-run-rate must be -1, 0 or a positive number")
+		}
+		if c.WebSecret != "" && len(c.WebSecret) < 16 {
+			bad("--web-secret must be at least 16 characters")
+		}
+		if strings.Contains(c.WebBasePath, "..") || strings.ContainsAny(c.WebBasePath, " ?#") {
+			bad("--web-base-path must be a plain URL path such as / or /chat/")
+		}
+	}
 	if c.RateLimit < 0 {
 		bad("--rate-limit must not be negative")
 	}
@@ -346,6 +412,16 @@ func (c *Config) validate() error {
 		bad("--log-level must be debug, info, warn or error")
 	}
 	return errors.Join(errs...)
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // usageFunc prints every flag with its environment variable (which is part

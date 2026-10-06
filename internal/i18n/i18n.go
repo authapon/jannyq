@@ -48,6 +48,20 @@ func (t *Translator) T(key string, args ...any) string {
 	return s
 }
 
+// Prefixed returns every message whose key starts with prefix (English
+// fills in what the language lacks), for handing UI texts to a front end.
+func (t *Translator) Prefixed(prefix string) map[string]string {
+	out := map[string]string{}
+	for _, src := range []map[string]string{t.fallback, t.msgs} {
+		for k, v := range src {
+			if strings.HasPrefix(k, prefix) {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
 // Normalize lower-cases a language tag and drops the region ("th-TH" → "th").
 func Normalize(lang string) string {
 	lang = strings.ToLower(strings.TrimSpace(lang))

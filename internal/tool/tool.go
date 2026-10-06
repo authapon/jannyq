@@ -16,7 +16,10 @@ type CallContext struct {
 	Channel    string
 	UserID     string
 	UserName   string
-	Lang       string
+	// Origin is set for anonymous channels (the web chat): the address the
+	// user comes from, which limits should be keyed on instead of the user.
+	Origin string
+	Lang   string
 }
 
 // Tool is a function the model may call.

@@ -281,3 +281,84 @@ func TestClosedManager(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestRecentSkipsToolPlumbing(t *testing.T) {
+	withSession(t, func(s *Session) {
+		_ = s.Append(ctx, user("q1"), call("c1"), result("c1"), assistant("a1"), user("q2"), assistant("a2"))
+		got, err := s.Recent(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []Turn{{"user", "q1"}, {"assistant", "a1"}, {"user", "q2"}, {"assistant", "a2"}}
+		if len(got) != len(want) {
+			t.Fatalf("got %+v", got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("turn %d = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+		last, _ := s.Recent(ctx, 2)
+		if len(last) != 2 || last[0].Text != "q2" || last[1].Text != "a2" {
+			t.Errorf("last two = %+v", last)
+		}
+		if none, _ := s.Recent(ctx, 0); len(none) != 0 {
+			t.Errorf("n=0 returned %+v", none)
+		}
+	})
+}
+
+func TestPeekDoesNotWaitForARunningRequest(t *testing.T) {
+	m := NewManager(t.TempDir(), 4, 1) // queue limit 1: With would answer ErrBusy
+	defer m.Close()
+	started, release := make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.With(ctx, "c", "1", func(s *Session) error {
+			_ = s.Append(ctx, user("in flight"))
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	got := make(chan []Turn, 1)
+	go func() {
+		_ = m.Peek("c", "1", func(s *Session) error {
+			turns, _ := s.Recent(ctx, 5)
+			got <- turns
+			return nil
+		})
+	}()
+	select {
+	case turns := <-got:
+		if len(turns) != 1 || turns[0].Text != "in flight" {
+			t.Errorf("turns = %+v", turns)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Peek blocked behind the running request")
+	}
+	close(release)
+	<-done
+	if err := m.With(ctx, "c", "1", func(*Session) error { return nil }); err != nil {
+		t.Errorf("Peek left the queue in a bad state: %v", err)
+	}
+}
+
+func TestPeekOnClosedManagerAndNewChat(t *testing.T) {
+	m := NewManager(t.TempDir(), 4, 4)
+	if err := m.Peek("c", "new", func(s *Session) error {
+		if turns, _ := s.Recent(ctx, 5); len(turns) != 0 {
+			t.Errorf("a new chat has history: %+v", turns)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+	if err := m.Peek("c", "new", func(*Session) error { return nil }); !errors.Is(err, ErrClosed) {
+		t.Errorf("err = %v", err)
+	}
+}
