@@ -1,0 +1,12 @@
+{
+  "help": "Hi! I'm an AI assistant. Just send me a message and I'll do my best to help. I can search the web and read web pages when needed.\n\nCommands:\n/help - show this message\n/reset - forget this conversation and start fresh\n/compact - summarise older messages to free up memory",
+  "reset_done": "Done. This conversation has been cleared.",
+  "compact_done": "Done. Older messages have been summarised.",
+  "compact_nothing": "The conversation is still short; there is nothing to compact yet.",
+  "busy": "I'm still working on your previous messages. Please wait a moment and try again.",
+  "rate_limited": "You're sending messages too quickly. Please wait a moment and try again.",
+  "error_generic": "Sorry, something went wrong while processing your message. Please try again.",
+  "empty_response": "Sorry, I couldn't come up with a reply. Could you rephrase your message?",
+  "unsupported_attachment": "Sorry, I can't read attachments yet. Please send your message as text.",
+  "not_allowed": "Sorry, you are not allowed to use this bot."
+}

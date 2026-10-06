@@ -1,0 +1,21 @@
+# Minimal SearXNG configuration for jannyq's web_search tool.
+# The important part is enabling the JSON output format; the default
+# SearXNG settings answer 403 to format=json requests.
+use_default_settings: true
+
+general:
+  instance_name: "jannyq-search"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+server:
+  # Overridden by the SEARXNG_SECRET environment variable (see docker-compose.yml).
+  secret_key: "change-me-please"
+  # The bot is the only client and lives on a private network, so the
+  # bot-detection limiter would only get in the way.
+  limiter: false
+  image_proxy: false

@@ -1,0 +1,81 @@
+# Example stack: jannyq + SearXNG + Ollama.
+#
+#   cp .env.example .env        # set JANNYQ_TELEGRAM_TOKEN, adjust the model
+#   docker compose up -d --build
+#   docker compose logs -f jannyq
+#
+# Using an OpenAI-compatible API instead of Ollama? Set JANNYQ_LLM_PROVIDER=openai,
+# JANNYQ_LLM_BASE_URL and JANNYQ_LLM_API_KEY in .env, and drop the ollama services.
+
+services:
+  jannyq:
+    build:
+      context: .
+      args:
+        VERSION: ${JANNYQ_VERSION:-dev}
+    image: jannyq:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      JANNYQ_LLM_PROVIDER: ${JANNYQ_LLM_PROVIDER:-ollama}
+      JANNYQ_LLM_BASE_URL: ${JANNYQ_LLM_BASE_URL:-http://ollama:11434}
+      JANNYQ_SEARXNG_URL: ${JANNYQ_SEARXNG_URL:-http://searxng:8080}
+    volumes:
+      - jannyq-data:/data
+    depends_on:
+      searxng:
+        condition: service_started
+      ollama:
+        condition: service_started
+    # Webhook-based channels (LINE, Messenger, WhatsApp, webbot) arrive in later
+    # phases and need a public HTTPS URL. Telegram and Discord do not.
+    # ports:
+    #   - "8080:8080"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-please}
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # Not published: only jannyq talks to it. Uncomment to try it in a browser.
+    # ports:
+    #   - "127.0.0.1:8081:8080"
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # NVIDIA GPU: install the NVIDIA Container Toolkit, then uncomment.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # One-shot helper that downloads the model into the ollama volume.
+  ollama-pull:
+    image: ollama/ollama:latest
+    restart: "no"
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c", "until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull \"$$MODEL\""]
+    command: []
+    env_file: .env
+
+volumes:
+  jannyq-data:
+  ollama-models:

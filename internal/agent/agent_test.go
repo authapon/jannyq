@@ -1,0 +1,381 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/authapon/jannyq/internal/llm"
+	"github.com/authapon/jannyq/internal/session"
+	"github.com/authapon/jannyq/internal/tool"
+)
+
+var ctx = context.Background()
+
+// fakeProvider replays scripted responses and records the requests.
+type fakeProvider struct {
+	mu       sync.Mutex
+	requests []llm.Request
+	script   []func(llm.Request) (*llm.Response, error)
+}
+
+func (f *fakeProvider) Chat(_ context.Context, req llm.Request) (*llm.Response, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, req)
+	if len(f.script) == 0 {
+		return nil, errors.New("fakeProvider: script exhausted")
+	}
+	next := f.script[0]
+	f.script = f.script[1:]
+	return next(req)
+}
+
+func say(text string) func(llm.Request) (*llm.Response, error) {
+	return func(llm.Request) (*llm.Response, error) {
+		return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: text}}, nil
+	}
+}
+
+func callTool(id, name, args string) func(llm.Request) (*llm.Response, error) {
+	return func(llm.Request) (*llm.Response, error) {
+		return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: id, Name: name, Arguments: json.RawMessage(args)},
+		}}}, nil
+	}
+}
+
+type echoTool struct {
+	calls []string
+	err   error
+	out   string
+}
+
+func (e *echoTool) Name() string        { return "echo" }
+func (e *echoTool) Description() string { return "echo" }
+func (e *echoTool) Parameters() []byte  { return []byte(`{"type":"object"}`) }
+func (e *echoTool) Execute(_ context.Context, _ tool.CallContext, args []byte) (string, error) {
+	e.calls = append(e.calls, string(args))
+	if e.err != nil {
+		return "", e.err
+	}
+	if e.out != "" {
+		return e.out, nil
+	}
+	return "echoed " + string(args), nil
+}
+
+func newAgent(p llm.Provider, cfg Config, tools ...tool.Tool) *Agent {
+	reg := tool.NewRegistry()
+	for _, t := range tools {
+		reg.Register(t)
+	}
+	if cfg.Model == "" {
+		cfg.Model = "test-model"
+	}
+	return New(cfg, p, reg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func withSession(t *testing.T, fn func(*session.Session)) {
+	t.Helper()
+	m := session.NewManager(t.TempDir(), 4, 4)
+	defer m.Close()
+	if err := m.With(ctx, "test", "chat", func(s *session.Session) error { fn(s); return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func history(t *testing.T, s *session.Session) []llm.Message {
+	t.Helper()
+	st, err := s.Messages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]llm.Message, len(st))
+	for i := range st {
+		out[i] = st[i].Message
+	}
+	return out
+}
+
+func TestSimpleReply(t *testing.T) {
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("  <think>hmm</think>\nHello there  ")}}
+	a := newAgent(p, Config{Lang: "th", ContextSize: 4096})
+	withSession(t, func(s *session.Session) {
+		got, err := a.Reply(ctx, s, Input{Text: "hi", Sender: "Ann"})
+		if err != nil || got != "Hello there" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+		h := history(t, s)
+		if len(h) != 2 || h[0].Content != "hi" || h[1].Content != "Hello there" {
+			t.Errorf("history = %+v", h)
+		}
+	})
+	req := p.requests[0]
+	if req.Model != "test-model" || req.ContextSize != 4096 {
+		t.Errorf("request = %+v", req)
+	}
+	sys := req.Messages[0]
+	if sys.Role != llm.RoleSystem || !strings.Contains(sys.Content, "Thai") {
+		t.Errorf("system prompt = %q", sys.Content)
+	}
+	if len(req.Tools) != 0 {
+		t.Errorf("no tools registered but request has %d", len(req.Tools))
+	}
+}
+
+func TestLanguageModes(t *testing.T) {
+	for mode, want := range map[string]string{
+		LangModeDefault:    "reply in Thai unless the user explicitly asks",
+		LangModeFollowUser: "reply in the language the user writes in; if unclear, reply in Thai",
+	} {
+		a := newAgent(&fakeProvider{}, Config{Lang: "th", LangMode: mode})
+		if got := a.systemPrompt(Input{}, false, a.now()); !strings.Contains(got, want) {
+			t.Errorf("%s: prompt lacks %q:\n%s", mode, want, got)
+		}
+	}
+}
+
+func TestGroupSenderPrefixAndPrompt(t *testing.T) {
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("ok")}}
+	a := newAgent(p, Config{})
+	withSession(t, func(s *session.Session) {
+		if _, err := a.Reply(ctx, s, Input{Text: "hello", Sender: "Bob", IsGroup: true}); err != nil {
+			t.Fatal(err)
+		}
+		if h := history(t, s); h[0].Content != "Bob: hello" {
+			t.Errorf("user message = %q", h[0].Content)
+		}
+	})
+	if !strings.Contains(p.requests[0].Messages[0].Content, "group chat") {
+		t.Error("group instructions missing from system prompt")
+	}
+}
+
+func TestToolLoop(t *testing.T) {
+	et := &echoTool{}
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		callTool("c1", "echo", `{"x":1}`),
+		func(req llm.Request) (*llm.Response, error) {
+			last := req.Messages[len(req.Messages)-1]
+			if last.Role != llm.RoleTool || last.ToolCallID != "c1" || last.Content != `echoed {"x":1}` {
+				t.Errorf("tool result not fed back: %+v", last)
+			}
+			return say("the answer")(req)
+		},
+	}}
+	a := newAgent(p, Config{}, et)
+	withSession(t, func(s *session.Session) {
+		got, err := a.Reply(ctx, s, Input{Text: "q"})
+		if err != nil || got != "the answer" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+		h := history(t, s)
+		if len(h) != 4 || h[1].ToolCalls[0].ID != "c1" || h[2].Role != llm.RoleTool || h[3].Content != "the answer" {
+			t.Errorf("history = %+v", h)
+		}
+	})
+	if len(et.calls) != 1 || len(p.requests[0].Tools) != 1 {
+		t.Errorf("calls=%v tools=%d", et.calls, len(p.requests[0].Tools))
+	}
+	if !strings.Contains(p.requests[0].Messages[0].Content, "web_search") {
+		t.Error("tool guidance missing from system prompt")
+	}
+}
+
+func TestToolErrorsAreReportedToModel(t *testing.T) {
+	et := &echoTool{err: errors.New("boom")}
+	var seen []string
+	record := func(req llm.Request) {
+		seen = append(seen, req.Messages[len(req.Messages)-1].Content)
+	}
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		callTool("a", "echo", `{}`),
+		func(req llm.Request) (*llm.Response, error) { record(req); return callTool("b", "nope", `{}`)(req) },
+		func(req llm.Request) (*llm.Response, error) {
+			record(req)
+			return callTool("c", "echo", `{"_invalid_arguments":"{bad"}`)(req)
+		},
+		func(req llm.Request) (*llm.Response, error) { record(req); return say("recovered")(req) },
+	}}
+	a := newAgent(p, Config{}, et)
+	withSession(t, func(s *session.Session) {
+		got, err := a.Reply(ctx, s, Input{Text: "q"})
+		if err != nil || got != "recovered" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	want := []string{"Error: boom", `Error: unknown tool "nope".`, "Error: the tool arguments were not valid JSON: {bad"}
+	for i, w := range want {
+		if i >= len(seen) || seen[i] != w {
+			t.Errorf("tool result %d = %q, want %q", i, seen[i], w)
+		}
+	}
+	if len(et.calls) != 1 {
+		t.Errorf("tool should have run once (invalid-args call must not execute), ran %d", len(et.calls))
+	}
+}
+
+func TestToolPanicIsContained(t *testing.T) {
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		callTool("a", "boom", `{}`),
+		func(req llm.Request) (*llm.Response, error) {
+			if c := req.Messages[len(req.Messages)-1].Content; !strings.Contains(c, "crashed") {
+				t.Errorf("result = %q", c)
+			}
+			return say("fine")(req)
+		},
+	}}
+	a := newAgent(p, Config{}, panicTool{})
+	withSession(t, func(s *session.Session) {
+		if got, err := a.Reply(ctx, s, Input{Text: "q"}); err != nil || got != "fine" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+}
+
+type panicTool struct{}
+
+func (panicTool) Name() string        { return "boom" }
+func (panicTool) Description() string { return "" }
+func (panicTool) Parameters() []byte  { return []byte(`{}`) }
+func (panicTool) Execute(context.Context, tool.CallContext, []byte) (string, error) {
+	panic("kaboom")
+}
+
+func TestToolOutputIsTruncated(t *testing.T) {
+	et := &echoTool{out: strings.Repeat("x", 500)}
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		callTool("a", "echo", `{}`),
+		func(req llm.Request) (*llm.Response, error) {
+			c := req.Messages[len(req.Messages)-1].Content
+			if !strings.Contains(c, "[truncated: 400 more characters]") {
+				t.Errorf("not truncated: %d chars", len(c))
+			}
+			return say("ok")(req)
+		},
+	}}
+	a := newAgent(p, Config{ToolMaxOutput: 100}, et)
+	withSession(t, func(s *session.Session) { _, _ = a.Reply(ctx, s, Input{Text: "q"}) })
+}
+
+func TestMaxStepsForcesFinalAnswer(t *testing.T) {
+	et := &echoTool{}
+	loop := func(req llm.Request) (*llm.Response, error) {
+		return callTool("x"+fmt.Sprint(len(req.Messages)), "echo", `{}`)(req)
+	}
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		loop, loop,
+		func(req llm.Request) (*llm.Response, error) {
+			if len(req.Tools) != 0 || !strings.Contains(req.Messages[0].Content, "used all available tool calls") {
+				t.Errorf("final step should have no tools and a nudge: tools=%d", len(req.Tools))
+			}
+			return say("best effort")(req)
+		},
+	}}
+	a := newAgent(p, Config{MaxSteps: 2}, et)
+	withSession(t, func(s *session.Session) {
+		got, err := a.Reply(ctx, s, Input{Text: "q"})
+		if err != nil || got != "best effort" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	if len(et.calls) != 2 {
+		t.Errorf("tool calls = %d, want 2", len(et.calls))
+	}
+}
+
+func TestExtraToolCallsAreSkipped(t *testing.T) {
+	et := &echoTool{}
+	many := func(llm.Request) (*llm.Response, error) {
+		var tcs []llm.ToolCall
+		for i := 0; i < maxToolCallsPerStep+2; i++ {
+			tcs = append(tcs, llm.ToolCall{ID: fmt.Sprint("c", i), Name: "echo", Arguments: json.RawMessage(`{}`)})
+		}
+		return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: tcs}}, nil
+	}
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){many, say("done")}}
+	a := newAgent(p, Config{}, et)
+	withSession(t, func(s *session.Session) {
+		if _, err := a.Reply(ctx, s, Input{Text: "q"}); err != nil {
+			t.Fatal(err)
+		}
+		// every call still gets a result, so the history stays valid
+		h := history(t, s)
+		if len(h) != 1+1+maxToolCallsPerStep+2+1 {
+			t.Errorf("history len = %d", len(h))
+		}
+	})
+	if len(et.calls) != maxToolCallsPerStep {
+		t.Errorf("ran %d calls, want %d", len(et.calls), maxToolCallsPerStep)
+	}
+}
+
+func TestEmptyResponse(t *testing.T) {
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("   <think>only thinking</think> ")}}
+	a := newAgent(p, Config{})
+	withSession(t, func(s *session.Session) {
+		if _, err := a.Reply(ctx, s, Input{Text: "q"}); !errors.Is(err, ErrEmptyResponse) {
+			t.Errorf("err = %v", err)
+		}
+	})
+}
+
+func TestProviderErrorKeepsUserMessage(t *testing.T) {
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		func(llm.Request) (*llm.Response, error) { return nil, errors.New("down") },
+	}}
+	a := newAgent(p, Config{})
+	withSession(t, func(s *session.Session) {
+		if _, err := a.Reply(ctx, s, Input{Text: "q"}); err == nil {
+			t.Fatal("expected error")
+		}
+		if h := history(t, s); len(h) != 1 || h[0].Content != "q" {
+			t.Errorf("history = %+v", h)
+		}
+	})
+}
+
+func TestToolsUnsupportedFallsBack(t *testing.T) {
+	var withTools []int
+	rec := func(req llm.Request) { withTools = append(withTools, len(req.Tools)) }
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		func(req llm.Request) (*llm.Response, error) { rec(req); return nil, llm.ErrToolsUnsupported },
+		func(req llm.Request) (*llm.Response, error) { rec(req); return say("no tools needed")(req) },
+		func(req llm.Request) (*llm.Response, error) { rec(req); return say("again")(req) },
+	}}
+	a := newAgent(p, Config{}, &echoTool{})
+	withSession(t, func(s *session.Session) {
+		if got, err := a.Reply(ctx, s, Input{Text: "q"}); err != nil || got != "no tools needed" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+		if _, err := a.Reply(ctx, s, Input{Text: "q2"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if fmt.Sprint(withTools) != "[1 0 0]" {
+		t.Errorf("tool counts per call = %v, want [1 0 0]", withTools)
+	}
+}
+
+func TestSummaryIsInjectedIntoSystemPrompt(t *testing.T) {
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("ok")}}
+	a := newAgent(p, Config{})
+	withSession(t, func(s *session.Session) {
+		_ = s.Append(ctx, llm.Message{Role: llm.RoleUser, Content: "old"}, llm.Message{Role: llm.RoleAssistant, Content: "old reply"})
+		old, _ := s.Messages(ctx)
+		_ = s.Compact(ctx, old[1].ID, "- user likes tea")
+		if _, err := a.Reply(ctx, s, Input{Text: "new"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if sys := p.requests[0].Messages[0].Content; !strings.Contains(sys, "- user likes tea") {
+		t.Errorf("summary missing:\n%s", sys)
+	}
+}

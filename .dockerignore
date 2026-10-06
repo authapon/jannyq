@@ -1,0 +1,11 @@
+.git
+.github
+bin
+data
+knowledge
+*.db
+*.db-wal
+*.db-shm
+.env
+docs
+README*.md
