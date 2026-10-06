@@ -26,6 +26,7 @@ func execConfig(c *config.SandboxConfig) sandbox.ExecConfig {
 		CPUSeconds:     c.CPUSeconds,
 		MaxFileBytes:   int64(c.MaxFileMB) << 20,
 		MaxOpenFiles:   c.OpenFiles,
+		UploadMaxBytes: int64(c.UploadMB) << 20,
 		MaxProcesses:   c.MaxProcs,
 		WorkspaceQuota: int64(c.QuotaMB) << 20,
 		MaxConcurrent:  c.MaxConcurrent,

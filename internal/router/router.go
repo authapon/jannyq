@@ -63,6 +63,7 @@ type Router struct {
 	limiter *ratelimit.Limiter
 
 	resetWorkspace func(ctx context.Context, workspace string) error
+	attach         *attachState
 
 	recordLimiter *ratelimit.Limiter
 	wg            sync.WaitGroup
@@ -147,15 +148,16 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	}
 
 	text := strings.TrimSpace(in.Text)
-	if text == "" {
+	hasFiles := r.attach != nil && len(in.Attachments) > 0
+	if text == "" && !hasFiles {
 		accept()
-		if in.HasAttachment {
+		if in.HasAttachment || len(in.Attachments) > 0 {
 			r.say(ctx, in, r.tr.T("unsupported_attachment"))
 		}
 		return
 	}
 
-	if cmd, ok := parseCommand(text); ok {
+	if cmd, ok := parseCommand(text); ok && !hasFiles {
 		// A reset forgets what was said up to now, not what is said while it waits
 		// for its turn: note where "now" is before letting later messages in.
 		var upTo int64
@@ -188,6 +190,13 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	stopTyping := r.keepTyping(ctx, in.Responder)
 	defer stopTyping()
 	err = r.sessions.With(ctx, in.Channel, in.ChatID, func(s *session.Session) error {
+		if hasFiles {
+			// Reading files takes a while, so it happens here, after the
+			// message has taken its place in the conversation.
+			if read := r.ingest(ctx, s, in, id); read == 0 && text == "" {
+				return nil // nothing to answer: the user was told what went wrong
+			}
+		}
 		r.respond(ctx, s, in, text, id)
 		return nil
 	})
@@ -308,7 +317,8 @@ func (r *Router) record(ctx context.Context, in channel.Incoming) {
 		return
 	}
 	text := strings.TrimSpace(in.Text)
-	if text == "" || !r.isAllowed(in) {
+	hasFiles := r.attach != nil && len(in.Attachments) > 0
+	if (text == "" && !hasFiles) || !r.isAllowed(in) {
 		return
 	}
 	if !r.recordLimiter.Allow(in.Channel + ":" + in.ChatID) {
@@ -321,8 +331,12 @@ func (r *Router) record(ctx context.Context, in channel.Incoming) {
 	err := r.sessions.Record(in.Channel, in.ChatID, func(s *session.Session) error {
 		in := in
 		in.IsGroup = true
-		if _, err := r.agent.Record(ctx, s, r.input(in, text)); err != nil {
+		id, err := r.agent.Record(ctx, s, r.input(in, text))
+		if err != nil {
 			return err
+		}
+		if hasFiles {
+			r.recordUnread(ctx, s, id, in.Attachments)
 		}
 		count, _ = s.Count(ctx)
 		// Last resort when compaction cannot run (the model is down, say):

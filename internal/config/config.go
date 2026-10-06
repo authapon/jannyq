@@ -82,6 +82,25 @@ type Config struct {
 	WebAllowedOrigins  []string
 	WebRunRate         int
 
+	// Attachments: pictures, PDFs and text files sent by users
+	Attachments       bool
+	Vision            string // auto, on or off
+	AttachMaxMB       int    // largest file accepted
+	AttachPerMessage  int
+	AttachRate        int // files per user per minute
+	AttachChatMB      int // disk space of one chat's files
+	AttachInlineChars int
+	AttachInbox       bool // copy files into the run_command workspace
+	ImageMaxEdge      int
+	ImageMessages     int // latest messages whose pictures are sent to the model
+	PDFEngine         string
+	PDFMaxPages       int
+	OCRLangs          string
+	OCRMaxPages       int
+	VisionPages       int // pages of a scanned PDF shown as pictures
+	WebMaxUploadMB    int
+	WebMaxFiles       int
+
 	// Channels
 	TelegramToken string
 	TelegramAPI   string
@@ -270,6 +289,25 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.str(&origins, "web-allowed-origins", "", "comma-separated extra origins allowed to post to the web chat, e.g. https://example.com")
 	l.integer(&c.WebRunRate, "web-run-rate", 3, "run_command calls per client address per minute from the web chat; 0 disables it there, -1 uses --run-rate")
 
+	// Attachments
+	l.boolean(&c.Attachments, "attachments", true, "let users send pictures, PDF files and text files")
+	l.str(&c.Vision, "vision", "auto", "can the model look at pictures: auto (asks Ollama; on for openai), on or off")
+	l.integer(&c.AttachMaxMB, "attach-max-mb", 20, "largest file accepted, in MB")
+	l.integer(&c.AttachPerMessage, "attach-per-message", 5, "files read per message")
+	l.integer(&c.AttachRate, "attach-rate", 10, "files per user per minute; 0 = unlimited")
+	l.integer(&c.AttachChatMB, "attach-chat-mb", 200, "disk space for the files of one chat in MB; the oldest are deleted beyond it")
+	l.integer(&c.AttachInlineChars, "attach-inline-chars", 6000, "longest document text shown in the conversation itself; longer documents are read with read_attachment")
+	l.boolean(&c.AttachInbox, "attach-inbox", true, "also copy files into the run_command workspace (inbox/) when commands are enabled")
+	l.integer(&c.ImageMaxEdge, "image-max-edge", 1568, "pictures are shrunk so that their longer side is at most this many pixels")
+	l.integer(&c.ImageMessages, "image-messages", 3, "how many of the latest messages with pictures are sent to the model with their pictures")
+	l.str(&c.PDFEngine, "pdf-engine", "auto", "where PDFs are read: auto (the sandbox when --sandbox-url is set), sandbox or native")
+	l.integer(&c.PDFMaxPages, "pdf-max-pages", 200, "longest PDF read, in pages")
+	l.str(&c.OCRLangs, "ocr-langs", "auto", "Tesseract languages for scanned PDFs, e.g. eng+tha; auto (eng, plus tha for --lang th) or off")
+	l.integer(&c.OCRMaxPages, "ocr-max-pages", 15, "pages of one scanned PDF that are recognised")
+	l.integer(&c.VisionPages, "vision-pages", 3, "pages of a scanned PDF shown to the model as pictures")
+	l.integer(&c.WebMaxUploadMB, "web-max-upload-mb", 10, "largest file the web chat accepts, in MB")
+	l.integer(&c.WebMaxFiles, "web-max-files", 4, "files per message in the web chat")
+
 	// Channels
 	l.secret(&c.TelegramToken, "telegram-token", "Telegram bot token; enables the Telegram channel")
 	l.str(&c.TelegramAPI, "telegram-api", "https://api.telegram.org", "Telegram Bot API base URL")
@@ -419,6 +457,43 @@ func (c *Config) validate() error {
 	if c.RateLimit < 0 {
 		bad("--rate-limit must not be negative")
 	}
+	switch c.Vision {
+	case "auto", "on", "off":
+	default:
+		bad("--vision must be auto, on or off")
+	}
+	switch c.PDFEngine {
+	case "auto", "native":
+	case "sandbox":
+		if c.SandboxURL == "" || len(c.SandboxToken) < 16 {
+			bad("--pdf-engine=sandbox needs --sandbox-url and --sandbox-token (at least 16 characters)")
+		}
+	default:
+		bad("--pdf-engine must be auto, sandbox or native")
+	}
+	if c.AttachMaxMB < 1 || c.AttachMaxMB > 200 {
+		bad("--attach-max-mb must be between 1 and 200")
+	}
+	if c.AttachPerMessage < 1 || c.AttachRate < 0 || c.AttachChatMB < 1 {
+		bad("--attach-per-message and --attach-chat-mb must be at least 1, --attach-rate not negative")
+	}
+	if c.ImageMaxEdge < 64 || c.ImageMaxEdge > 8192 {
+		bad("--image-max-edge must be between 64 and 8192")
+	}
+	if c.ImageMessages < 1 || c.VisionPages < 0 || c.OCRMaxPages < 0 || c.PDFMaxPages < 1 || c.AttachInlineChars < 100 {
+		bad("--image-messages and --pdf-max-pages must be at least 1, --attach-inline-chars at least 100")
+	}
+	if l := strings.TrimSpace(c.OCRLangs); l != "auto" && l != "off" && l != "" {
+		for _, r := range l {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '+') {
+				bad("--ocr-langs must be like eng+tha, auto or off")
+				break
+			}
+		}
+	}
+	if c.WebMaxUploadMB < 1 || c.WebMaxFiles < 1 {
+		bad("--web-max-upload-mb and --web-max-files must be at least 1")
+	}
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":
 	default:
@@ -473,4 +548,19 @@ func (c *Config) Location() (*time.Location, error) {
 		return nil, fmt.Errorf("unknown time zone %q (use an IANA name such as Asia/Bangkok or Europe/London)", name)
 	}
 	return loc, nil
+}
+
+// OCRLanguages returns the Tesseract languages to use, "" when OCR is off.
+func (c *Config) OCRLanguages() string {
+	switch l := strings.TrimSpace(c.OCRLangs); l {
+	case "off":
+		return ""
+	case "", "auto":
+		if strings.HasPrefix(strings.ToLower(c.Lang), "th") {
+			return "eng+tha"
+		}
+		return "eng"
+	default:
+		return l
+	}
 }

@@ -50,6 +50,21 @@ type Config struct {
 	Location     *time.Location
 	TimezoneName string
 
+	// Vision says whether the model can look at pictures. ImageMessages is how
+	// many of the latest messages with pictures are sent with their pictures
+	// (default 3); InlineChars is the longest attachment text shown in the
+	// conversation itself (default 6000).
+	Vision        bool
+	ImageMessages int
+	InlineChars   int
+	// Attachments says that users may send files; it adds guidance to the
+	// system prompt. The read_attachment and search_attachment tools should be
+	// registered as well.
+	Attachments bool
+	// Inbox says that copies of attachments are placed in the command
+	// workspace (see attach.InboxPath) when run_command is available.
+	Inbox bool
+
 	// Skills, when set, lists skills in the system prompt (the load_skill
 	// tool must be registered for the model to use them).
 	Skills SkillCatalog
@@ -189,6 +204,9 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		Origin:     in.Origin,
 		Lang:       a.cfg.Lang,
 	}
+	if a.cfg.Attachments {
+		cc.Attachments = sessionFiles{s}
+	}
 
 	for step := 0; step <= a.cfg.MaxSteps; step++ {
 		summary, err := s.Summary(ctx)
@@ -199,7 +217,11 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		if err != nil {
 			return "", err
 		}
-		history := a.renderHistory(cc.SessionKey, in.IsGroup, stored)
+		view, err := a.newView(ctx, s, stored, false)
+		if err != nil {
+			return "", err
+		}
+		history := a.renderHistory(cc.SessionKey, in.IsGroup, stored, view)
 		note := a.answerNote(cc.SessionKey, in.IsGroup, stored, in.AnswerFor)
 
 		var defs []llm.ToolDef

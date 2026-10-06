@@ -222,7 +222,7 @@ func TestAttachmentOnlyMessage(t *testing.T) {
 	in := msg(rec, "")
 	in.HasAttachment = true
 	r.Handle(ctx, in)
-	if got := rec.all(); len(got) != 1 || !strings.Contains(got[0], "attachments") {
+	if got := rec.all(); len(got) != 1 || !strings.Contains(got[0], "only read pictures") {
 		t.Errorf("sent = %q", got)
 	}
 	rec2 := &recorder{}

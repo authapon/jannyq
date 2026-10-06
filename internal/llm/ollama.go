@@ -19,6 +19,7 @@ type Ollama struct {
 type ollamaMessage struct {
 	Role      string           `json:"role"`
 	Content   string           `json:"content"`
+	Images    [][]byte         `json:"images,omitempty"` // base64 in JSON
 	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
 	ToolName  string           `json:"tool_name,omitempty"`
 }
@@ -60,6 +61,9 @@ func (o *Ollama) Chat(ctx context.Context, req Request) (*Response, error) {
 	body := ollamaRequest{Model: req.Model, Stream: false}
 	for _, m := range req.Messages {
 		om := ollamaMessage{Role: string(m.Role), Content: m.Content}
+		for _, img := range m.Images {
+			om.Images = append(om.Images, img.Data)
+		}
 		if m.Role == RoleTool {
 			om.ToolName = m.Name
 		}
@@ -129,4 +133,44 @@ func (o *Ollama) Chat(ctx context.Context, req Request) (*Response, error) {
 		Message: out,
 		Usage:   Usage{PromptTokens: resp.PromptEvalCount, CompletionTokens: resp.EvalCount},
 	}, nil
+}
+
+// SupportsVision asks Ollama whether the model can look at pictures, using
+// /api/show: newer servers list "vision" among the model's capabilities, older
+// ones show a CLIP projector in the model details.
+func (o *Ollama) SupportsVision(ctx context.Context, model string) (bool, error) {
+	headers := map[string]string{}
+	if o.APIKey != "" {
+		headers["Authorization"] = "Bearer " + o.APIKey
+	}
+	var resp struct {
+		Capabilities []string `json:"capabilities"`
+		Details      struct {
+			Families []string `json:"families"`
+		} `json:"details"`
+		ModelInfo map[string]json.RawMessage `json:"model_info"`
+	}
+	url := strings.TrimRight(o.BaseURL, "/") + "/api/show"
+	if err := postJSON(ctx, o.Client, url, headers, map[string]string{"model": model}, &resp); err != nil {
+		return false, err
+	}
+	for _, c := range resp.Capabilities {
+		if strings.EqualFold(c, "vision") {
+			return true, nil
+		}
+	}
+	if len(resp.Capabilities) > 0 {
+		return false, nil // the server lists capabilities, and vision is not among them
+	}
+	for _, f := range resp.Details.Families {
+		if strings.EqualFold(f, "clip") || strings.EqualFold(f, "mllama") {
+			return true, nil
+		}
+	}
+	for k := range resp.ModelInfo {
+		if strings.Contains(k, ".vision.") || strings.HasPrefix(k, "clip.") {
+			return true, nil
+		}
+	}
+	return false, nil
 }

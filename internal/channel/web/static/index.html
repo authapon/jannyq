@@ -27,6 +27,11 @@
     <div id="messages" role="log" aria-live="polite"></div>
     <div id="status" aria-live="polite"></div>
     <form id="composer" autocomplete="off">
+      <ul id="files" hidden></ul>
+      <button id="attach" type="button" class="icon" hidden>
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.05l-8.5 8.5a5.5 5.5 0 01-7.78-7.78l8.5-8.5a3.67 3.67 0 015.19 5.19l-8.5 8.5a1.83 1.83 0 01-2.6-2.6l7.8-7.79"/></svg>
+      </button>
+      <input id="file" type="file" multiple hidden>
       <textarea id="input" rows="1" enterkeyhint="send"></textarea>
       <button id="send" type="submit"></button>
     </form>

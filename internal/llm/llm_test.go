@@ -200,3 +200,114 @@ func TestEstimateTokens(t *testing.T) {
 		t.Errorf("thai should cost more tokens per character")
 	}
 }
+
+func TestOpenAISendsImagesAsDataURIs(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		io.WriteString(w, `{"choices":[{"message":{"content":"a cat"}}]}`)
+	}))
+	defer srv.Close()
+	p := &OpenAI{BaseURL: srv.URL, Client: srv.Client()}
+	_, err := p.Chat(context.Background(), Request{Model: "m", Messages: []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "what is this?", Images: []Image{{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}, {MIME: "image/png", Data: []byte("PNG")}}},
+		{Role: RoleUser, Content: "plain"},
+		{Role: RoleUser, Images: []Image{{MIME: "image/png", Data: []byte("X")}}}, // image without text
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := got["messages"].([]any)
+	if msgs[0].(map[string]any)["content"] != "sys" || msgs[2].(map[string]any)["content"] != "plain" {
+		t.Errorf("text-only messages must keep a plain string: %v", msgs)
+	}
+	parts := msgs[1].(map[string]any)["content"].([]any)
+	if len(parts) != 3 {
+		t.Fatalf("parts = %v", parts)
+	}
+	if p0 := parts[0].(map[string]any); p0["type"] != "text" || p0["text"] != "what is this?" {
+		t.Errorf("first part = %v", p0)
+	}
+	u1 := parts[1].(map[string]any)["image_url"].(map[string]any)["url"]
+	u2 := parts[2].(map[string]any)["image_url"].(map[string]any)["url"]
+	if u1 != "data:image/jpeg;base64,/9j/" || u2 != "data:image/png;base64,UE5H" {
+		t.Errorf("urls = %v, %v", u1, u2)
+	}
+	only := msgs[3].(map[string]any)["content"].([]any)
+	if len(only) != 1 || only[0].(map[string]any)["type"] != "image_url" {
+		t.Errorf("an image-only message must have no empty text part: %v", only)
+	}
+}
+
+func TestOllamaSendsImagesAsBase64(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		io.WriteString(w, `{"message":{"role":"assistant","content":"a dog"}}`)
+	}))
+	defer srv.Close()
+	p := &Ollama{BaseURL: srv.URL, Client: srv.Client()}
+	_, err := p.Chat(context.Background(), Request{Model: "m", Messages: []Message{
+		{Role: RoleUser, Content: "look", Images: []Image{{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}}},
+		{Role: RoleUser, Content: "no image"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := got["messages"].([]any)
+	imgs := msgs[0].(map[string]any)["images"].([]any)
+	if len(imgs) != 1 || imgs[0] != "/9j/" {
+		t.Errorf("images = %v", imgs)
+	}
+	if _, has := msgs[1].(map[string]any)["images"]; has {
+		t.Error("a message without images must not carry an images field")
+	}
+}
+
+func TestImagesCountInTheTokenEstimate(t *testing.T) {
+	plain := EstimateMessages([]Message{{Role: RoleUser, Content: "hello"}})
+	with := EstimateMessages([]Message{{Role: RoleUser, Content: "hello", Images: []Image{{}, {}}}})
+	if with-plain != 2*ImageTokens {
+		t.Errorf("two images add %d tokens, want %d", with-plain, 2*ImageTokens)
+	}
+}
+
+func TestOllamaSupportsVision(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want bool
+	}{
+		"capabilities with vision":    {`{"capabilities":["completion","vision","tools"]}`, true},
+		"capabilities without vision": {`{"capabilities":["completion","tools"],"details":{"families":["clip"]}}`, false},
+		"old server, clip family":     {`{"details":{"families":["llama","clip"]}}`, true},
+		"old server, vision keys":     {`{"model_info":{"general.architecture":"x","gemma3.vision.block_count":27}}`, true},
+		"old server, text only":       {`{"details":{"families":["llama"]},"model_info":{"llama.block_count":32}}`, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var in map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			if r.URL.Path != "/api/show" || in["model"] != "m1" || r.Header.Get("Authorization") != "Bearer k" {
+				t.Errorf("%s: request %s %v %q", name, r.URL.Path, in, r.Header.Get("Authorization"))
+			}
+			io.WriteString(w, tc.body)
+		}))
+		o := &Ollama{BaseURL: srv.URL, APIKey: "k", Client: srv.Client()}
+		got, err := o.SupportsVision(context.Background(), "m1")
+		srv.Close()
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %v, %v", name, got, err)
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		io.WriteString(w, `{"error":"model not found"}`)
+	}))
+	defer srv.Close()
+	o := &Ollama{BaseURL: srv.URL, Client: srv.Client()}
+	if _, err := o.SupportsVision(context.Background(), "nope"); err == nil {
+		t.Error("an unknown model must be an error, not 'no vision'")
+	}
+}

@@ -33,6 +33,7 @@ type ExecConfig struct {
 	CPUSeconds     int           // RLIMIT_CPU per command; default = MaxTimeout
 	MaxFileBytes   int64         // largest single file a command may write; default 100 MiB
 	MaxOpenFiles   int           // default 256
+	UploadMaxBytes int64         // largest file Put accepts; default 64 MiB
 	MaxProcesses   int           // RLIMIT_NPROC per command; only meaningful with per-workspace users; default 128
 	WorkspaceQuota int64         // default 256 MiB
 	MaxConcurrent  int           // simultaneous commands; default 4
@@ -86,6 +87,9 @@ func (c *ExecConfig) defaults() error {
 	if c.MaxOpenFiles <= 0 {
 		c.MaxOpenFiles = 256
 	}
+	if c.UploadMaxBytes <= 0 {
+		c.UploadMaxBytes = 64 << 20
+	}
 	if c.MaxProcesses <= 0 {
 		c.MaxProcesses = 128
 	}
@@ -113,7 +117,8 @@ func (c *ExecConfig) defaults() error {
 	}
 	if len(c.ToolCandidates) == 0 {
 		c.ToolCandidates = []string{"python3", "node", "curl", "wget", "jq", "git", "bc", "awk", "sed",
-			"grep", "tar", "zip", "unzip", "sqlite3", "openssl", "tree", "file", "ffmpeg", "convert", "pdftotext"}
+			"grep", "tar", "zip", "unzip", "sqlite3", "openssl", "tree", "file", "ffmpeg", "convert",
+			"pdftotext", "pdfinfo", "pdftoppm", "tesseract"}
 	}
 	return nil
 }
@@ -209,6 +214,7 @@ func (e *Executor) Info() Info {
 		MaxTimeout:     seconds(e.cfg.MaxTimeout),
 		MaxOutputBytes: e.cfg.MaxOutputBytes,
 		QuotaBytes:     e.cfg.WorkspaceQuota,
+		Files:          true,
 	}
 	for _, t := range e.cfg.ToolCandidates {
 		if _, err := exec.LookPath(t); err == nil {

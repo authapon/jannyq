@@ -111,7 +111,7 @@ func (a *Agent) header(chatKey string, group bool, st session.Stored) string {
 // user messages get their header, everything else is passed on unchanged.
 // It is deterministic, so the rendered history is the same on every call and
 // the model server can reuse its cache of the unchanged beginning.
-func (a *Agent) renderHistory(chatKey string, group bool, stored []session.Stored) []llm.Message {
+func (a *Agent) renderHistory(chatKey string, group bool, stored []session.Stored, v *attachView) []llm.Message {
 	out := make([]llm.Message, 0, len(stored))
 	for _, st := range stored {
 		m := st.Message
@@ -121,6 +121,16 @@ func (a *Agent) renderHistory(chatKey string, group bool, stored []session.Store
 				m.Content = h + " " + body
 			} else {
 				m.Content = body
+			}
+			if text, images := v.render(a, st); text != "" {
+				switch {
+				case strings.TrimSpace(body) != "":
+					m.Content += "\n"
+				case m.Content != "" && !strings.HasSuffix(m.Content, " "):
+					m.Content += " "
+				}
+				m.Content += text
+				m.Images = images
 			}
 		}
 		out = append(out, m)

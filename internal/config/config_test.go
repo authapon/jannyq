@@ -320,3 +320,40 @@ func mustLoc(t *testing.T, c *Config) *time.Location {
 	}
 	return loc
 }
+
+func TestAttachmentDefaultsAndValidation(t *testing.T) {
+	base := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	c, err := load(t, nil, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Attachments || c.Vision != "auto" || c.AttachMaxMB != 20 || c.ImageMaxEdge != 1568 || c.PDFEngine != "auto" ||
+		c.ImageMessages != 3 || c.PDFMaxPages != 200 || c.OCRLanguages() != "eng" || !c.AttachInbox {
+		t.Errorf("defaults: %+v", c)
+	}
+	if got := (&Config{Lang: "th-TH", OCRLangs: "auto"}).OCRLanguages(); got != "eng+tha" {
+		t.Errorf("thai default = %q", got)
+	}
+	if got := (&Config{OCRLangs: "off"}).OCRLanguages(); got != "" {
+		t.Errorf("off = %q", got)
+	}
+	if got := (&Config{OCRLangs: "deu+eng"}).OCRLanguages(); got != "deu+eng" {
+		t.Errorf("explicit = %q", got)
+	}
+	for _, bad := range [][]string{
+		{"--vision=maybe"}, {"--pdf-engine=cloud"}, {"--pdf-engine=sandbox"}, {"--attach-max-mb=0"}, {"--attach-max-mb=500"},
+		{"--image-max-edge=10"}, {"--ocr-langs=eng;rm -rf"}, {"--image-messages=0"}, {"--web-max-files=0"}, {"--attach-inline-chars=5"},
+	} {
+		if _, err := load(t, bad, base); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+	c, err = load(t, []string{"--pdf-engine=sandbox", "--sandbox-url=http://s:9090"}, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_SANDBOX_TOKEN": "0123456789abcdef"})
+	if err != nil || c.PDFEngine != "sandbox" {
+		t.Errorf("pdf-engine=sandbox: %v", err)
+	}
+	c, err = load(t, nil, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_ATTACHMENTS": "false", "JANNYQ_VISION": "off"})
+	if err != nil || c.Attachments || c.Vision != "off" {
+		t.Errorf("env: %v %+v", err, c)
+	}
+}

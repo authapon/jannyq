@@ -18,6 +18,10 @@ A chat bot written in Go that connects messaging platforms to **Ollama** or any
   - `run_command` — runs a shell command in a sandbox (see [below](#run_command-and-the-sandbox)); open to
     everyone, with per-user rate limits, resource limits and an audit log. **Off by default.**
   - `load_skill` — loads instructions from your [skills](#skills).
+  - `read_attachment` and `search_attachment` — read long documents that users sent page by page, and find
+    passages in them (see [Pictures, PDFs and text files](#pictures-pdfs-and-text-files)).
+- **Pictures, PDFs and text files**: users can send them on Telegram and in the web chat. The main model looks
+  at pictures itself (so it must be a vision model); PDFs are read in the sandbox, with OCR for scans.
 - **Time and names in every conversation**: each user message reaches the model with a header giving when it
   was sent and, in groups, who sent it (see [below](#conversation-context-time-and-names)).
 - **Memory per chat**: every user (private chat) and every group has its own SQLite database
@@ -97,6 +101,11 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--audit-log` | `<data-dir>/audit/commands.jsonl` | one JSON line per command, rotated at 10 MB |
 | `--skills-dir` | – | directory of skills; enables `load_skill` |
 | `--skills-sandbox-path` | `/skills` | where that directory is mounted inside the sandbox |
+| `--attachments` | `true` | let users send pictures, PDFs and text files ([details](#pictures-pdfs-and-text-files)) |
+| `--vision` | `auto` | can the model see pictures: `auto` (asks Ollama; `on` for `openai`), `on`, `off` |
+| `--pdf-engine` | `auto` | read PDFs in the `sandbox` (when `--sandbox-url` is set), or `native` (in-process, no OCR) |
+| `--ocr-langs` | `auto` | Tesseract languages for scans, e.g. `eng+tha`; `off` disables OCR |
+| `--attach-max-mb` / `--attach-per-message` / `--attach-rate` | `20` / `5` / `10` | per file, files per message, files per user per minute |
 | `--telegram-token` | – | enables the Telegram channel (prefer the env var) |
 | `--cli` | `false` | enable the terminal channel |
 | `--allowed-users` | everyone | comma-separated user IDs or `channel:id` |
@@ -125,6 +134,38 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 The model must support **tool calling** for `web_search`/`web_fetch` to work (for Ollama: qwen3, llama3.1+,
 mistral-nemo, …). If a model rejects tools, jannyq logs a warning and keeps chatting without them.
 Always set `--context-size` for Ollama: its default context is small and long pages would be silently cut.
+
+## Pictures, PDFs and text files
+
+Send a photo, a PDF or a text file (with or without a caption) and the model reads it. What happens to each:
+
+| File | What the model gets |
+|---|---|
+| **Picture** (JPEG, PNG, GIF, WebP) | The picture itself, for the main model to look at. It is turned upright (EXIF), shrunk to `--image-max-edge` (1568 px), flattened onto white and re-encoded as JPEG, which also drops its metadata (GPS, camera). Needs a vision model: with `--vision=auto` jannyq asks Ollama (`/api/show`); for `--llm-provider=openai` it assumes yes, so use `--vision=off` if your model cannot see. Without vision, pictures are refused with a clear message. |
+| **PDF** with text | The extracted text, page by page. Up to `--attach-inline-chars` (6000) it is shown in the message itself; longer documents are listed with their size and the model reads them with `read_attachment` (page by page) or finds passages with `search_attachment`. |
+| **Scanned PDF** (no text layer) | The text recognised with Tesseract (`--ocr-langs`, default `eng`, plus `tha` for `--lang th`), and, for a vision model, pictures of the first `--vision-pages` (3) pages. A scan with neither OCR nor vision is refused. |
+| **Text file** (txt, md, csv, json, code, …) | Decoded (UTF-8, UTF-16, or Windows-874 for Thai) and treated like a PDF's text. |
+
+Things to know:
+
+- **Types are decided by content**, not by the file name or the type the app claims. Anything else (zip, exe, …) is refused.
+- **PDFs are untrusted input to a large parser**, so jannyq has the **sandbox** read them (`pdfinfo`, `pdftotext`, `pdftoppm`,
+  `tesseract` in the sandbox image) instead of parsing them next to its own secrets. With `--pdf-engine=auto`
+  that happens whenever `--sandbox-url` is set — **even with `--run-command=off`** — and the sandbox has the tools;
+  otherwise a built-in pure-Go reader is used (no OCR, no page pictures; a warning is logged). `--pdf-engine=sandbox` never falls back.
+- Text from a file is **data, never instructions**: it is framed between markers, look-alike markers and message
+  headers inside it are neutralised, and the system prompt tells the model not to obey it.
+- **Only the latest pictures are sent**: the `--image-messages` (3) most recent messages with pictures keep them; older ones become
+  a note ("no longer shown"), because a picture costs far more context than its description. Pictures count towards compaction.
+- Everything is stored in the chat's own directory (`<data-dir>/sessions/…/files/`), limited to `--attach-chat-mb`
+  (200) per chat — the oldest files go first — and removed by `/reset`. With `run_command` on, a copy is placed in the
+  chat's workspace as `inbox/<id>-<name>` (`--attach-inbox`) so commands can work on it.
+- **Limits**: `--attach-max-mb` (20) per file, `--attach-per-message` (5), `--attach-rate` (10 per user per minute),
+  `--pdf-max-pages` (200), `--ocr-max-pages` (15), pictures over 40 megapixels are refused before decoding.
+  An unaddressed group message with a file records only that a file was sent; it is not downloaded or opened.
+- **Telegram**: photos and documents (bot API limit 20 MB); albums arrive as one message. **Web chat**: 📎 button, drag and drop or paste;
+  `--web-max-upload-mb` (10) and `--web-max-files` (4). Other platforms follow with their channels.
+- Turn it all off with `--attachments=false`.
 
 ## Conversation context: time and names
 
@@ -268,7 +309,8 @@ internal/config     flags + JANNYQ_* environment
 internal/llm        Provider interface; Ollama and OpenAI-compatible clients
 internal/agent      conversation loop, tool execution, compaction
 internal/session    per-chat SQLite storage with an LRU of open databases
-internal/tool       web_search, web_fetch, run_command, load_skill, SSRF-safe HTTP client
+internal/tool       web_search, web_fetch, run_command, load_skill, read/search_attachment, SSRF-safe HTTP client
+internal/attach     pictures (resize, EXIF), PDF text/OCR (sandbox or pure Go), text-file decoding
 internal/sandbox    command executor (limits, per-chat users), HTTP server and client
 internal/skill      skills loader
 internal/audit      command audit log
@@ -294,7 +336,8 @@ make docker
    Telegram, CLI, Docker.
 2. ✅ **`run_command` + skills** — sandbox executor with per-chat users, limits, quotas and audit log; skills loader.
 3. ✅ **Web chat** and the shared webhook server (signature checks, rate limits, HTTPS with Caddy).
-4. Images and PDFs (vision uses the main model; PDF text extraction with OCR fallback).
+4. ✅ **Pictures, PDFs and text files** — vision through the main model, PDFs read in the sandbox (OCR for scans),
+   Telegram photos/documents/albums and web uploads.
 5. Knowledge base (RAG) from a folder of text/PDF files: SQLite, hybrid vector + full-text search, live sync
    of edits and deletions, `knowledge_search` tool.
 6. Discord and LINE.
@@ -304,6 +347,8 @@ make docker
 ## Security notes
 
 - `web_fetch` refuses non-public addresses and ignores proxy environment variables on purpose.
+- Files sent by users are untrusted: types are detected from content, pixel counts are checked before decoding,
+  PDFs are parsed in the sandbox, and their text is framed as data. Don't set `--pdf-engine=native` for a public bot.
 - Content returned by tools is untrusted; the system prompt tells the model not to follow instructions in it.
 - Don't expose the bot to everyone without `--rate-limit`; model time is the expensive resource.
 - Keep `JANNYQ_SANDBOX_TOKEN` secret and out of the sandbox container's volumes; rotate it if it leaks.

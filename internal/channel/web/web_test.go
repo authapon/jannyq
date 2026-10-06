@@ -639,8 +639,8 @@ func TestHistory(t *testing.T) {
 	h.start()
 	id := strings.SplitN(h.cookieValue(), ".", 2)[0]
 	hist.turns = map[string][]Turn{
-		id:        {{"user", "hi"}, {"assistant", "hello"}},
-		"someone": {{"user", "secret"}},
+		id:        {{Role: "user", Text: "hi"}, {Role: "assistant", Text: "hello"}},
+		"someone": {{Role: "user", Text: "secret"}},
 	}
 	code, m := h.json("GET", "/api/history", "", nil)
 	msgs, _ := m["messages"].([]any)

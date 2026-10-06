@@ -291,12 +291,12 @@ func TestRecentSkipsToolPlumbing(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []Turn{{"user", "q1"}, {"assistant", "a1"}, {"user", "q2"}, {"assistant", "a2"}}
+		want := []Turn{{Role: "user", Text: "q1"}, {Role: "assistant", Text: "a1"}, {Role: "user", Text: "q2"}, {Role: "assistant", Text: "a2"}}
 		if len(got) != len(want) {
 			t.Fatalf("got %+v", got)
 		}
 		for i := range want {
-			if got[i] != want[i] {
+			if got[i].Role != want[i].Role || got[i].Text != want[i].Text || len(got[i].Attachments) != 0 {
 				t.Errorf("turn %d = %+v, want %+v", i, got[i], want[i])
 			}
 		}
@@ -592,4 +592,172 @@ func TestResetUpToKeepsLaterMessages(t *testing.T) {
 			t.Errorf("count = %d", n)
 		}
 	})
+}
+
+func TestAttachmentsRoundTripAndCleanup(t *testing.T) {
+	withSession(t, func(s *Session) {
+		dir, err := s.FilesDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mkfile := func(name, content string) string {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join("files", name)
+		}
+		m1, _ := s.AppendEntry(ctx, Entry{Message: user("look at this")})
+		m2, _ := s.AppendEntry(ctx, Entry{Message: user("and this")})
+		a1, err := s.AddAttachment(ctx, Attachment{MessageID: m1, Kind: "image", Name: "cat.jpg", MIME: "image/jpeg", Size: 5000,
+			Path: mkfile("1.jpg", "jpg"), Images: []string{mkfile("1.jpg", "jpg")}, StoredBytes: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a2, _ := s.AddAttachment(ctx, Attachment{MessageID: m2, Kind: "pdf", Name: "doc.pdf", MIME: "application/pdf", Size: 9000, Pages: 12, Chars: 3400,
+			Path: mkfile("2.pdf", "pdf"), TextPath: mkfile("2.txt", "text"), Inline: true, Note: "ok", StoredBytes: 7})
+
+		got, err := s.AttachmentByID(ctx, a2)
+		if err != nil || got.Name != "doc.pdf" || got.Pages != 12 || !got.Inline || got.TextPath != "files/2.txt" || got.MessageID != m2 {
+			t.Fatalf("attachment = %+v err = %v", got, err)
+		}
+		if _, err := s.AttachmentByID(ctx, 999); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("unknown id: %v", err)
+		}
+		all, _ := s.AttachmentsFrom(ctx, m1)
+		if len(all[m1]) != 1 || all[m1][0].ID != a1 || len(all[m1][0].Images) != 1 || len(all[m2]) != 1 {
+			t.Errorf("grouped = %+v", all)
+		}
+		if later, _ := s.AttachmentsFrom(ctx, m2); len(later) != 1 || len(later[m2]) != 1 {
+			t.Errorf("from m2 = %+v", later)
+		}
+		turns, _ := s.Recent(ctx, 10)
+		if len(turns[0].Attachments) != 1 || turns[0].Attachments[0] != "cat.jpg" || turns[1].Attachments[0] != "doc.pdf" {
+			t.Errorf("web history = %+v", turns)
+		}
+
+		// forgetting the first message deletes its attachment and its files, not the other's
+		if err := s.ResetUpTo(ctx, m1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AttachmentByID(ctx, a1); err == nil {
+			t.Error("the attachment of a forgotten message survived")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "1.jpg")); !os.IsNotExist(err) {
+			t.Errorf("its file survived: %v", err)
+		}
+		if _, err := s.AttachmentByID(ctx, a2); err != nil {
+			t.Errorf("the other attachment was deleted: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "2.pdf")); err != nil {
+			t.Errorf("its file was deleted: %v", err)
+		}
+		if err := s.Reset(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "2.txt")); !os.IsNotExist(err) {
+			t.Errorf("a full reset left files behind: %v", err)
+		}
+	})
+}
+
+func TestAttachmentPathsCannotEscapeTheSession(t *testing.T) {
+	withSession(t, func(s *Session) {
+		outside := filepath.Join(filepath.Dir(s.Dir()), "precious.txt")
+		if err := os.WriteFile(outside, []byte("keep me"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m, _ := s.AppendEntry(ctx, Entry{Message: user("x")})
+		_, _ = s.AddAttachment(ctx, Attachment{MessageID: m, Kind: "pdf", Name: "evil", Path: "../precious.txt", TextPath: outside, Images: []string{"../../etc/hostname"}})
+		if err := s.Reset(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := os.ReadFile(outside); err != nil || string(b) != "keep me" {
+			t.Errorf("a stored path made the session delete a file outside it: %q %v", b, err)
+		}
+		for _, bad := range []string{"", "/etc/passwd", "../x", "files/../../x", ".."} {
+			if _, err := s.FilePath(bad); err == nil {
+				t.Errorf("FilePath(%q) accepted", bad)
+			}
+		}
+		if p, err := s.FilePath("files/ok.txt"); err != nil || !strings.HasPrefix(p, s.Dir()) {
+			t.Errorf("FilePath = %q %v", p, err)
+		}
+	})
+}
+
+func TestEvictAttachmentsKeepsTheNewestAndTheLiveOnes(t *testing.T) {
+	withSession(t, func(s *Session) {
+		dir, _ := s.FilesDir()
+		add := func(msg int64, name string, size int64) int64 {
+			rel := filepath.Join("files", name)
+			_ = os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o600)
+			id, _ := s.AddAttachment(ctx, Attachment{MessageID: msg, Kind: "pdf", Name: name, Path: rel, StoredBytes: size})
+			return id
+		}
+		old, _ := s.AppendEntry(ctx, Entry{Message: user("old")})
+		add(old, "a.pdf", 400)
+		mid, _ := s.AppendEntry(ctx, Entry{Message: user("mid")})
+		b := add(mid, "b.pdf", 400)
+		last, _ := s.AppendEntry(ctx, Entry{Message: user("last")})
+		c := add(last, "c.pdf", 400)
+		// the message of the oldest attachment was compacted away
+		_ = s.Compact(ctx, old, "summary")
+
+		if n, err := s.EvictAttachments(ctx, 2000); err != nil || n != 0 {
+			t.Errorf("under the limit: removed %d err %v", n, err)
+		}
+		n, err := s.EvictAttachments(ctx, 900) // 1200 bytes stored: one must go, the orphan first
+		if err != nil || n != 1 {
+			t.Fatalf("removed %d, err %v", n, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "a.pdf")); !os.IsNotExist(err) {
+			t.Error("the attachment of the compacted message should have gone first")
+		}
+		if _, err := s.AttachmentByID(ctx, b); err != nil {
+			t.Error("a live attachment was evicted before the orphan")
+		}
+		n, _ = s.EvictAttachments(ctx, 500) // now the older live one
+		if n != 1 {
+			t.Errorf("removed %d", n)
+		}
+		if _, err := s.AttachmentByID(ctx, c); err != nil {
+			t.Error("the newest attachment must be the last to go")
+		}
+	})
+}
+
+func TestVersion1DatabasesGainTheAttachmentsTable(t *testing.T) {
+	base := t.TempDir()
+	legacyDB(t, base) // version 0
+	m := NewManager(base, 4, 4)
+	_ = m.With(ctx, "tg", "group1", func(s *Session) error { return nil }) // migrates to the current version
+	m.Close()
+	// now pretend it had stopped at version 1: no attachments table
+	dir := sessionDir(base, "tg", "group1")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(dir, "session.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE attachments`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	m = NewManager(base, 4, 4)
+	defer m.Close()
+	err = m.With(ctx, "tg", "group1", func(s *Session) error {
+		mid, _ := s.AppendEntry(ctx, Entry{Message: user("new")})
+		if _, err := s.AddAttachment(ctx, Attachment{MessageID: mid, Kind: "text", Name: "n.txt"}); err != nil {
+			t.Errorf("AddAttachment after the upgrade: %v", err)
+		}
+		if got, _ := s.Messages(ctx); len(got) != 3 {
+			t.Errorf("old messages lost: %d", len(got))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

@@ -41,7 +41,11 @@ func (a *Agent) MaybeCompact(ctx context.Context, s *session.Session) (bool, err
 		if err != nil {
 			return false, err
 		}
-		est := llm.EstimateTokens(summary) + promptOverhead + estimateStored(stored)
+		view, err := a.newView(ctx, s, stored, false)
+		if err != nil {
+			return false, err
+		}
+		est := llm.EstimateTokens(summary) + promptOverhead + estimateStored(stored) + view.tokens(stored)
 		if last := s.LastPromptTokens(ctx); last > est {
 			est = last
 		}
@@ -60,7 +64,11 @@ func (a *Agent) Compact(ctx context.Context, s *session.Session, keep int) (bool
 	if err != nil {
 		return false, err
 	}
-	cut := a.chooseCut(stored, keep)
+	view, err := a.newView(ctx, s, stored, false)
+	if err != nil {
+		return false, err
+	}
+	cut := a.chooseCut(stored, keep, view)
 	if cut <= 0 {
 		return false, nil
 	}
@@ -71,7 +79,11 @@ func (a *Agent) Compact(ctx context.Context, s *session.Session, keep int) (bool
 	}
 	// The summariser sees the messages exactly as the model does, with who said
 	// them and when, so that the summary can keep that.
-	rendered := a.renderHistory(s.Channel+":"+s.ChatID, s.IsGroup(ctx), old)
+	briefView, err := a.newView(ctx, s, old, true)
+	if err != nil {
+		return false, err
+	}
+	rendered := a.renderHistory(s.Channel+":"+s.ChatID, s.IsGroup(ctx), old, briefView)
 	summary, err := a.summarize(ctx, prev, rendered)
 	if err != nil {
 		return false, err
@@ -87,7 +99,7 @@ func (a *Agent) Compact(ctx context.Context, s *session.Session, keep int) (bool
 // chooseCut returns the index of the first message to keep verbatim: a user
 // message such that at most keep messages (and, when the context size is
 // known, a bounded number of tokens) remain. 0 means nothing can be compacted.
-func (a *Agent) chooseCut(stored []session.Stored, keep int) int {
+func (a *Agent) chooseCut(stored []session.Stored, keep int, v *attachView) int {
 	var users []int
 	for i, st := range stored {
 		if st.Message.Role == llm.RoleUser {
@@ -100,7 +112,7 @@ func (a *Agent) chooseCut(stored []session.Stored, keep int) int {
 			continue
 		}
 		if a.cfg.ContextSize > 0 && !isLast &&
-			float64(estimateStored(stored[i:])) > keptTokenShare*float64(a.cfg.ContextSize) {
+			float64(estimateStored(stored[i:])+v.tokens(stored[i:])) > keptTokenShare*float64(a.cfg.ContextSize) {
 			continue
 		}
 		return i

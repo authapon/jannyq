@@ -151,6 +151,16 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	if skills != nil {
 		acfg.Skills = skills
 	}
+	att := newAttachments(ctx, cfg, provider, runner, log)
+	if att != nil {
+		tools.Register(tool.ReadAttachment{})
+		tools.Register(tool.SearchAttachment{})
+		acfg.Attachments = true
+		acfg.Vision = att.vision
+		acfg.ImageMessages = cfg.ImageMessages
+		acfg.InlineChars = cfg.AttachInlineChars
+		acfg.Inbox = att.files != nil
+	}
 	ag := agent.New(acfg, provider, tools, log)
 
 	sessionsDir := filepath.Join(cfg.DataDir, "sessions")
@@ -172,6 +182,9 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	}, sessions, ag, tr, log)
 	if runner != nil {
 		rt.SetWorkspaceReset(runner.runner.Reset)
+	}
+	if att != nil {
+		rt.SetAttachments(att.routerConfig(cfg))
 	}
 
 	var srv *server.Server
@@ -208,6 +221,9 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 			AllowedOrigins:     cfg.WebAllowedOrigins,
 			Strings:            tr.Prefixed("web_"),
 			History:            webHistory{sessions},
+			Attachments:        att != nil,
+			MaxUploadBytes:     int64(min(cfg.WebMaxUploadMB, cfg.AttachMaxMB)) << 20,
+			MaxFiles:           cfg.WebMaxFiles,
 		}, srv, log)
 		if err != nil {
 			return err

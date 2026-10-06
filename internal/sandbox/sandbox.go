@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"regexp"
 	"time"
 )
@@ -20,6 +21,10 @@ var (
 	ErrEmptyCommand     = errors.New("sandbox: empty command")
 	ErrCommandTooLong   = errors.New("sandbox: command too long")
 	ErrUnavailable      = errors.New("sandbox: service unavailable")
+	ErrBadPath          = errors.New("sandbox: invalid file path")
+	ErrNotFound         = errors.New("sandbox: file not found")
+	ErrTooLarge         = errors.New("sandbox: file too large")
+	ErrQuota            = errors.New("sandbox: workspace is full")
 )
 
 // MaxCommandBytes bounds the size of one command line.
@@ -58,6 +63,19 @@ type Info struct {
 	MaxOutputBytes int      `json:"max_output_bytes"`
 	QuotaBytes     int64    `json:"workspace_quota_bytes"`
 	Tools          []string `json:"tools,omitempty"`
+	// Files is true when the sandbox accepts file uploads and downloads.
+	Files bool `json:"files,omitempty"`
+}
+
+// Files moves files in and out of a workspace. Paths are relative to the
+// workspace and may not leave it.
+type Files interface {
+	// Put stores up to maxBytes read from r at path, creating directories.
+	Put(ctx context.Context, workspace, path string, r io.Reader, maxBytes int64) error
+	// Get returns the file at path; larger files fail with ErrTooLarge.
+	Get(ctx context.Context, workspace, path string, maxBytes int64) ([]byte, error)
+	// Remove deletes the file at path.
+	Remove(ctx context.Context, workspace, path string) error
 }
 
 // Runner executes commands. Executor (in process) and Client (remote) both

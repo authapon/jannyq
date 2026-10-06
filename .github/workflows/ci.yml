@@ -11,6 +11,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: PDF tools (the tests that read PDFs in the sandbox way need them)
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-tha
       - name: gofmt
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...

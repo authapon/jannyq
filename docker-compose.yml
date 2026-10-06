@@ -7,8 +7,9 @@
 # Using an OpenAI-compatible API instead of Ollama? Set JANNYQ_LLM_PROVIDER=openai,
 # JANNYQ_LLM_BASE_URL and JANNYQ_LLM_API_KEY in .env, and drop the ollama services.
 #
-# Don't want the model to run commands? Set JANNYQ_RUN_COMMAND=off and remove the
-# sandbox service together with jannyq's depends_on entry for it.
+# Don't want the model to run commands? Set JANNYQ_RUN_COMMAND=off. Keep the sandbox service
+# anyway: PDFs that users send are read inside it (text, page pictures, OCR of scans). Without it
+# the bot falls back to a built-in reader without OCR, running next to its secrets.
 #
 # Networks: jannyq talks to the sandbox over `sandbox`, an internal network without internet
 # access. The sandbox is on no other network, so commands cannot reach Ollama, SearXNG or the
@@ -29,6 +30,8 @@ services:
       JANNYQ_SEARXNG_URL: ${JANNYQ_SEARXNG_URL:-http://searxng:8080}
       JANNYQ_RUN_COMMAND: ${JANNYQ_RUN_COMMAND:-sandbox}
       JANNYQ_SANDBOX_URL: http://sandbox:9090
+      # Pictures need a model that can see them (Ollama: e.g. gemma3, qwen2.5vl, llama3.2-vision).
+      # JANNYQ_VISION=auto asks Ollama; set on/off to override.
       JANNYQ_SKILLS_DIR: /skills
       # The web chat is off here; docker-compose.public.yml turns it on behind HTTPS.
       JANNYQ_WEB: ${JANNYQ_WEB:-false}

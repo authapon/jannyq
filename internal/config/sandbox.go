@@ -28,6 +28,7 @@ type SandboxConfig struct {
 	OpenFiles      int
 	MaxProcs       int
 	QuotaMB        int
+	UploadMB       int
 	MaxConcurrent  int
 	IdleTTL        time.Duration
 	Network        string // "on" or "off": what the surrounding container provides
@@ -58,6 +59,7 @@ func LoadSandbox(args []string, env func(string) string, stderr io.Writer) (*San
 	l.integer(&c.OpenFiles, "open-files", 256, "open file limit per command")
 	l.integer(&c.MaxProcs, "max-procs", 128, "processes (threads) one workspace's user may have at once, against fork bombs")
 	l.integer(&c.QuotaMB, "quota-mb", 256, "size limit per workspace in MB")
+	l.integer(&c.UploadMB, "max-upload-mb", 64, "largest file that can be uploaded into a workspace, in MB")
 	l.integer(&c.MaxConcurrent, "max-concurrent", 4, "commands running at once")
 	l.duration(&c.IdleTTL, "idle-ttl", 7*24*time.Hour, "delete workspaces unused for this long")
 	l.str(&c.Network, "network", "off", "tell the model whether the sandbox has internet access: on or off (set by the deployment, not enforced here)")
@@ -95,7 +97,7 @@ func (c *SandboxConfig) validate() error {
 	}
 	for name, v := range map[string]int{
 		"max-output-kb": c.MaxOutputKB, "max-file-mb": c.MaxFileMB, "open-files": c.OpenFiles,
-		"quota-mb": c.QuotaMB, "max-concurrent": c.MaxConcurrent, "max-procs": c.MaxProcs,
+		"quota-mb": c.QuotaMB, "max-concurrent": c.MaxConcurrent, "max-procs": c.MaxProcs, "max-upload-mb": c.UploadMB,
 	} {
 		if v < 1 {
 			bad("--%s must be at least 1", name)

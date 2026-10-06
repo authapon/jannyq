@@ -29,14 +29,28 @@ type ToolCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
+// Image is a picture attached to a message. The bytes are a complete image
+// file (JPEG or PNG); providers encode them as their API requires.
+type Image struct {
+	MIME string `json:"mime"`
+	Data []byte `json:"data"`
+}
+
+// ImageTokens is the estimated cost of one image in tokens. Real costs vary
+// with the model and the picture's size; this is a deliberately round figure
+// used only to decide when a conversation has become too long.
+const ImageTokens = 1000
+
 // Message is one chat message. For RoleTool messages, ToolCallID links the
-// result to the call and Name holds the tool name.
+// result to the call and Name holds the tool name. Images are only meaningful
+// on user messages.
 type Message struct {
 	Role       Role       `json:"role"`
 	Content    string     `json:"content,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
+	Images     []Image    `json:"images,omitempty"`
 }
 
 // ToolDef describes a callable tool; Parameters is a JSON Schema object.
@@ -138,7 +152,7 @@ func EstimateTokens(s string) int {
 func EstimateMessages(msgs []Message) int {
 	n := 0
 	for _, m := range msgs {
-		n += 4 + EstimateTokens(m.Content)
+		n += 4 + EstimateTokens(m.Content) + ImageTokens*len(m.Images)
 		for _, tc := range m.ToolCalls {
 			n += EstimateTokens(tc.Name) + EstimateTokens(string(tc.Arguments))
 		}

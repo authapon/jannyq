@@ -3,6 +3,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,19 @@ type Responder interface {
 	Typing(ctx context.Context) error
 }
 
+// ErrTooLarge is returned by Attachment.Fetch for a file over the limit.
+var ErrTooLarge = errors.New("channel: file too large")
+
+// Attachment is a file that came with a message. The content is fetched on
+// demand, so the router can turn a message away before any download happens.
+type Attachment struct {
+	Name string // file name, if the platform gives one
+	MIME string // declared type, if any; not trusted
+	Size int64  // declared size in bytes, 0 if unknown
+	// Fetch returns the content, failing if it is larger than max bytes.
+	Fetch func(ctx context.Context, max int64) ([]byte, error)
+}
+
 // Incoming is a user message from any channel.
 type Incoming struct {
 	Channel  string // channel name, e.g. "telegram"
@@ -29,8 +43,11 @@ type Incoming struct {
 	// private chats; in groups when the bot is mentioned, replied to, or
 	// given a command.
 	Addressed bool
-	// HasAttachment is true when the message carried a file, photo, etc.
-	// that the channel could not turn into text.
+	// Attachments are the files the message carried, if the channel can
+	// provide them.
+	Attachments []Attachment
+	// HasAttachment is true when the message carried something the channel
+	// could not provide (a video, a sticker, ...) and nothing else.
 	HasAttachment bool
 	// ReceivedAt is when the message was sent. Channels set it when the
 	// platform says so; otherwise the router uses the time it arrived.

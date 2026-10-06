@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -22,6 +23,16 @@ type oaiMessage struct {
 	ToolCalls  []oaiToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	Name       string        `json:"name,omitempty"`
+}
+
+type oaiPart struct {
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	ImageURL *oaiImageURL `json:"image_url,omitempty"`
+}
+
+type oaiImageURL struct {
+	URL string `json:"url"`
 }
 
 type oaiToolCall struct {
@@ -72,9 +83,22 @@ func toOAIMessages(msgs []Message) []oaiMessage {
 		if m.Role == RoleTool {
 			om.Name = m.Name
 		}
-		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 && m.Content == "" {
+		switch {
+		case m.Role == RoleAssistant && len(m.ToolCalls) > 0 && m.Content == "":
 			om.Content = nil
-		} else {
+		case len(m.Images) > 0:
+			// vision input: a list of parts, the text first
+			parts := make([]oaiPart, 0, len(m.Images)+1)
+			if m.Content != "" {
+				parts = append(parts, oaiPart{Type: "text", Text: m.Content})
+			}
+			for _, img := range m.Images {
+				parts = append(parts, oaiPart{Type: "image_url", ImageURL: &oaiImageURL{
+					URL: "data:" + img.MIME + ";base64," + base64.StdEncoding.EncodeToString(img.Data),
+				}})
+			}
+			om.Content = parts
+		default:
 			om.Content = m.Content
 		}
 		for _, tc := range m.ToolCalls {

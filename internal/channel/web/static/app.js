@@ -116,9 +116,14 @@
 
   // ---- UI ----
 
-  function addMessage(role, text) {
+  function addMessage(role, text, files) {
     const box = el('div', 'msg ' + role);
     if (role === 'bot') rich(box, text); else box.textContent = text;
+    if (files && files.length) {
+      const f = el('span', 'files');
+      f.textContent = '\u{1F4CE} ' + files.join(', ');
+      box.append(f);
+    }
     const list = $('messages');
     const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
     list.append(box);
@@ -175,7 +180,7 @@
     $('reset').hidden = false;
     const res = await api('GET', 'api/history');
     if (res.ok && res.data && Array.isArray(res.data.messages)) {
-      for (const m of res.data.messages) addMessage(m.role === 'user' ? 'user' : 'bot', m.text);
+      for (const m of res.data.messages) addMessage(m.role === 'user' ? 'user' : 'bot', m.text, m.attachments);
     }
     connect();
     $('input').focus();
@@ -201,11 +206,56 @@
     };
   }
 
-  async function send(text) {
-    const res = await api('POST', 'api/send', { text });
+  // Files chosen for the next message.
+  let pending = [];
+
+  function renderFiles() {
+    const list = $('files');
+    list.replaceChildren();
+    for (const [i, f] of pending.entries()) {
+      const li = el('li');
+      const name = el('span', 'name');
+      name.textContent = f.name;
+      const rm = el('button');
+      rm.type = 'button';
+      rm.textContent = '\u00d7';
+      rm.title = t.web_attach_remove || 'Remove';
+      rm.setAttribute('aria-label', (t.web_attach_remove || 'Remove') + ' ' + f.name);
+      rm.addEventListener('click', () => { pending.splice(i, 1); renderFiles(); });
+      li.append(name, rm);
+      list.append(li);
+    }
+    list.hidden = pending.length === 0;
+  }
+
+  function addFiles(files) {
+    for (const f of files) {
+      if (pending.length >= (cfg.maxFiles || 1)) { addError(t.web_attach_too_many || 'Too many files.'); break; }
+      if (f.size > cfg.maxFileBytes) { addError(f.name + ': ' + (t.web_attach_too_big || 'Too large.')); continue; }
+      pending.push(f);
+    }
+    renderFiles();
+  }
+
+  async function send(text, files) {
+    let res;
+    if (files && files.length) {
+      const form = new FormData();
+      form.append('text', text);
+      for (const f of files) form.append('files', f, f.name);
+      const r = await fetch(base + 'api/send', { method: 'POST', credentials: 'same-origin', body: form });
+      let data = null;
+      try { data = await r.json(); } catch (_) { /* no body */ }
+      res = { ok: r.ok, status: r.status, data };
+    } else {
+      res = await api('POST', 'api/send', { text });
+    }
     if (res.ok) return true;
     if (res.status === 401) { init(); return false; }
-    const key = { 413: 'web_too_long', 429: 'web_rate_limited' }[res.status] || 'web_error';
+    let key = { 413: 'web_too_long', 429: 'web_rate_limited' }[res.status] || 'web_error';
+    if (res.status === 413 && res.data && /file/.test(res.data.error || '')) {
+      key = /many/.test(res.data.error) ? 'web_attach_too_many' : 'web_attach_too_big';
+    }
     addError(t[key] || t.web_error || 'Error');
     return false;
   }
@@ -217,11 +267,15 @@
   async function submitMessage() {
     const input = $('input');
     const text = input.value.trim();
-    if (!text) return;
+    const files = pending;
+    if (!text && files.length === 0) return;
     input.value = '';
+    pending = [];
+    renderFiles();
     autosize();
-    if (isReset(text)) $('messages').replaceChildren(); else addMessage('user', text);
-    await send(text);
+    if (isReset(text) && files.length === 0) $('messages').replaceChildren();
+    else addMessage('user', text, files.map((f) => f.name));
+    await send(text, files);
   }
 
   function autosize() {
@@ -242,6 +296,9 @@
     t = cfg.strings || {};
     applyStrings();
     $('input').maxLength = cfg.maxMessage;
+    $('attach').hidden = !cfg.attachments;
+    $('attach').title = t.web_attach || '';
+    $('attach').setAttribute('aria-label', t.web_attach || 'Attach a file');
     if (cfg.needsCode && !cfg.authed) showLogin(); else await showChat();
   }
 
@@ -249,6 +306,27 @@
   $('input').addEventListener('input', autosize);
   $('input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submitMessage(); }
+  });
+  $('attach').addEventListener('click', () => $('file').click());
+  $('file').addEventListener('change', () => { addFiles($('file').files); $('file').value = ''; });
+  const dropTarget = $('composer');
+  for (const ev of ['dragenter', 'dragover']) {
+    dropTarget.addEventListener(ev, (e) => {
+      if (!cfg || !cfg.attachments || !e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) return;
+      e.preventDefault();
+      dropTarget.classList.add('drag');
+    });
+  }
+  for (const ev of ['dragleave', 'drop']) dropTarget.addEventListener(ev, () => dropTarget.classList.remove('drag'));
+  dropTarget.addEventListener('drop', (e) => {
+    if (!cfg || !cfg.attachments || !e.dataTransfer || e.dataTransfer.files.length === 0) return;
+    e.preventDefault();
+    addFiles(e.dataTransfer.files);
+  });
+  $('input').addEventListener('paste', (e) => {
+    if (!cfg || !cfg.attachments || !e.clipboardData || e.clipboardData.files.length === 0) return;
+    e.preventDefault();
+    addFiles(e.clipboardData.files);
   });
   $('reset').addEventListener('click', async () => {
     $('messages').replaceChildren();

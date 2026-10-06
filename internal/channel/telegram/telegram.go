@@ -38,6 +38,9 @@ type Channel struct {
 	log     *slog.Logger
 	botID   int64
 	botUser string
+
+	albumMu sync.Mutex
+	albums  map[albumKey]*album
 }
 
 // New creates the channel.
@@ -156,11 +159,12 @@ type tgMessage struct {
 	Chat            tgChat     `json:"chat"`
 	Text            string     `json:"text"`
 	Caption         string     `json:"caption"`
+	MediaGroupID    string     `json:"media_group_id"`
 	ReplyToMessage  *tgMessage `json:"reply_to_message"`
 
 	// Presence of any of these means the message carries media.
 	Photo     json.RawMessage `json:"photo"`
-	Document  json.RawMessage `json:"document"`
+	Document  *tgDocument     `json:"document"`
 	Voice     json.RawMessage `json:"voice"`
 	Audio     json.RawMessage `json:"audio"`
 	Video     json.RawMessage `json:"video"`
@@ -169,13 +173,105 @@ type tgMessage struct {
 	Sticker   json.RawMessage `json:"sticker"`
 }
 
+type tgDocument struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+	MIMEType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
+}
+
+type tgPhotoSize struct {
+	FileID   string `json:"file_id"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	FileSize int64  `json:"file_size"`
+}
+
 func (m *tgMessage) hasMedia() bool {
-	for _, r := range []json.RawMessage{m.Photo, m.Document, m.Voice, m.Audio, m.Video, m.VideoNote, m.Animation, m.Sticker} {
+	if m.Document != nil {
+		return true
+	}
+	for _, r := range []json.RawMessage{m.Photo, m.Voice, m.Audio, m.Video, m.VideoNote, m.Animation, m.Sticker} {
 		if len(r) > 0 && string(r) != "null" {
 			return true
 		}
 	}
 	return false
+}
+
+// attachments lists the files of a message that can be fetched: the largest
+// size of a photo, or a document.
+func (c *Channel) attachments(m *tgMessage) []channel.Attachment {
+	var out []channel.Attachment
+	if len(m.Photo) > 0 {
+		var sizes []tgPhotoSize
+		if json.Unmarshal(m.Photo, &sizes) == nil {
+			best := -1
+			for i, s := range sizes {
+				if s.FileID != "" && (best < 0 || s.Width*s.Height > sizes[best].Width*sizes[best].Height) {
+					best = i
+				}
+			}
+			if best >= 0 {
+				s := sizes[best]
+				out = append(out, channel.Attachment{
+					Name: fmt.Sprintf("photo-%d.jpg", m.MessageID), MIME: "image/jpeg", Size: s.FileSize,
+					Fetch: c.fetcher(s.FileID, s.FileSize),
+				})
+			}
+		}
+	}
+	if d := m.Document; d != nil && d.FileID != "" {
+		out = append(out, channel.Attachment{Name: d.FileName, MIME: d.MIMEType, Size: d.FileSize, Fetch: c.fetcher(d.FileID, d.FileSize)})
+	}
+	return out
+}
+
+// fetcher returns a function that downloads a file through getFile. Bot API
+// downloads are limited to 20 MB by Telegram itself.
+func (c *Channel) fetcher(fileID string, declared int64) func(context.Context, int64) ([]byte, error) {
+	return func(ctx context.Context, max int64) ([]byte, error) {
+		if declared > max {
+			return nil, channel.ErrTooLarge
+		}
+		var f struct {
+			FilePath string `json:"file_path"`
+			FileSize int64  `json:"file_size"`
+		}
+		if err := c.call(ctx, "getFile", map[string]any{"file_id": fileID}, &f); err != nil {
+			var ae *apiError
+			if errors.As(err, &ae) && strings.Contains(strings.ToLower(ae.Description), "too big") {
+				return nil, channel.ErrTooLarge
+			}
+			return nil, err
+		}
+		if f.FilePath == "" {
+			return nil, errors.New("telegram: getFile returned no path")
+		}
+		if f.FileSize > max {
+			return nil, channel.ErrTooLarge
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.APIBase+"/file/bot"+c.cfg.Token+"/"+f.FilePath, nil)
+		if err != nil {
+			return nil, c.redact(err)
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, c.redact(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("telegram: downloading a file failed (HTTP %d)", resp.StatusCode)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+		if err != nil {
+			return nil, c.redact(err)
+		}
+		if int64(len(data)) > max {
+			return nil, channel.ErrTooLarge
+		}
+		return data, nil
+	}
 }
 
 type update struct {
@@ -230,6 +326,36 @@ func (c *Channel) Run(ctx context.Context, sink channel.Sink) error {
 			}
 			in, ok := c.convert(u.Message)
 			if !ok {
+				continue
+			}
+			if u.Message.MediaGroupID != "" && len(in.Attachments) > 0 {
+				// The pictures of an album arrive as separate messages: collect
+				// them into one, which takes the place of the first.
+				key := albumKey{u.Message.Chat.ID, u.Message.MediaGroupID}
+				if c.joinAlbum(key, in) {
+					continue
+				}
+				wait, accepted := orderer.Enter(in.ChatID)
+				in.Accepted = accepted
+				a := c.startAlbum(key, in)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					defer accepted()
+					if wait != nil {
+						select {
+						case <-wait:
+						case <-ctx.Done():
+							return
+						}
+					}
+					select {
+					case <-a.done:
+					case <-ctx.Done():
+						return
+					}
+					sink(ctx, c.sealAlbum(key, a))
+				}()
 				continue
 			}
 			// Updates are handled concurrently, but a chat's messages must be
@@ -348,7 +474,9 @@ func (c *Channel) convert(m *tgMessage) (channel.Incoming, bool) {
 	if m.Date > 0 {
 		sentAt = time.Unix(m.Date, 0)
 	}
+	atts := c.attachments(m)
 	return channel.Incoming{
+		Attachments:   atts,
 		ReceivedAt:    sentAt,
 		Channel:       "telegram",
 		ChatID:        strconv.FormatInt(m.Chat.ID, 10),
@@ -357,7 +485,7 @@ func (c *Channel) convert(m *tgMessage) (channel.Incoming, bool) {
 		Text:          text,
 		IsGroup:       isGroup,
 		Addressed:     addressed,
-		HasAttachment: m.hasMedia(),
+		HasAttachment: m.hasMedia() && len(atts) == 0,
 		Responder: &responder{
 			c: c, chatID: m.Chat.ID, replyTo: m.MessageID, thread: thread, isGroup: isGroup,
 		},

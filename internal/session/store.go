@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
 `
 
 // schemaVersion is the current value of PRAGMA user_version.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migrate brings a database created by an older version up to date.
 func migrate(db *sql.DB) error {
@@ -59,6 +59,32 @@ func migrate(db *sql.DB) error {
 			`ALTER TABLE messages ADD COLUMN sender_id   TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE messages ADD COLUMN sender_name TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE messages ADD COLUMN sent_at     TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+	}
+	if v < 2 { // files sent with messages
+		for _, stmt := range []string{
+			`CREATE TABLE IF NOT EXISTS attachments (
+				id           INTEGER PRIMARY KEY AUTOINCREMENT,
+				message_id   INTEGER NOT NULL,
+				kind         TEXT NOT NULL,
+				name         TEXT NOT NULL,
+				mime         TEXT NOT NULL DEFAULT '',
+				size         INTEGER NOT NULL DEFAULT 0,
+				path         TEXT NOT NULL DEFAULT '',
+				text_path    TEXT NOT NULL DEFAULT '',
+				pages        INTEGER NOT NULL DEFAULT 0,
+				chars        INTEGER NOT NULL DEFAULT 0,
+				inline       INTEGER NOT NULL DEFAULT 0,
+				images       TEXT NOT NULL DEFAULT '',
+				note         TEXT NOT NULL DEFAULT '',
+				stored_bytes INTEGER NOT NULL DEFAULT 0,
+				created_at   INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id)`,
 		} {
 			if _, err := tx.Exec(stmt); err != nil {
 				return err
@@ -222,8 +248,9 @@ func (s *Session) Messages(ctx context.Context) ([]Stored, error) {
 
 // Turn is one user message or assistant reply, as shown to people.
 type Turn struct {
-	Role string // "user" or "assistant"
-	Text string
+	Role        string // "user" or "assistant"
+	Text        string
+	Attachments []string // names of the files sent with a user message
 }
 
 // Recent returns up to n of the latest conversational messages, oldest
@@ -233,23 +260,38 @@ func (s *Session) Recent(ctx context.Context, n int) ([]Turn, error) {
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT role, content FROM messages
+		`SELECT id, role, content FROM messages
 		 WHERE role = 'user' OR (role = 'assistant' AND content != '')
 		 ORDER BY id DESC LIMIT ?`, n)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var turns []Turn
+	var ids []int64
 	for rows.Next() {
 		var t Turn
-		if err := rows.Scan(&t.Role, &t.Text); err != nil {
+		var id int64
+		if err := rows.Scan(&id, &t.Role, &t.Text); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		turns = append(turns, t)
+		ids = append(ids, id)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if len(ids) > 0 {
+		names, err := s.AttachmentsFrom(ctx, ids[len(ids)-1])
+		if err != nil {
+			return nil, err
+		}
+		for i, id := range ids {
+			for _, a := range names[id] {
+				turns[i].Attachments = append(turns[i].Attachments, a.Name)
+			}
+		}
 	}
 	for i, j := 0, len(turns)-1; i < j; i, j = i+1, j-1 {
 		turns[i], turns[j] = turns[j], turns[i]
@@ -319,6 +361,9 @@ func (s *Session) Prune(ctx context.Context, keep int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := s.deleteAttachments(ctx, `message_id < ?`, cutoff); err != nil {
+		return 0, err
+	}
 	return res.RowsAffected()
 }
 
@@ -377,7 +422,11 @@ func (s *Session) ResetUpTo(ctx context.Context, upTo int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM meta WHERE key IN (?, ?)`, metaSummary, metaLastPromptTokens); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// forgetting the conversation includes the files that were sent in it
+	return s.deleteAttachments(ctx, `message_id <= ?`, upTo)
 }
 
 // sessionDir maps a chat to its directory: <base>/<channel>/<name>. The name

@@ -34,8 +34,9 @@ var staticFS embed.FS
 
 // Turn is one message of the conversation shown after a page reload.
 type Turn struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
+	Role        string   `json:"role"`
+	Text        string   `json:"text"`
+	Attachments []string `json:"attachments,omitempty"` // names of files sent with the message
 }
 
 // History provides the stored conversation of a chat.
@@ -70,6 +71,13 @@ type Config struct {
 	History            History
 	// MaxInFlight bounds messages being processed at once; 0 selects 64.
 	MaxInFlight int
+
+	// Attachments lets visitors send files with a message. MaxUploadBytes
+	// limits one file (default 10 MiB) and MaxFiles their number per message
+	// (default 4).
+	Attachments    bool
+	MaxUploadBytes int64
+	MaxFiles       int
 }
 
 const (
@@ -88,6 +96,7 @@ type Channel struct {
 	hub     *hub
 	orderer *channel.Orderer
 
+	uploads        chan struct{} // bounds uploads read into memory at once
 	sendLimiter    *ratelimit.Limiter
 	loginLimiter   *ratelimit.Limiter
 	sessionLimiter *ratelimit.Limiter
@@ -121,6 +130,12 @@ func New(cfg Config, host Host, log *slog.Logger) (*Channel, error) {
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = 64
 	}
+	if cfg.MaxUploadBytes <= 0 {
+		cfg.MaxUploadBytes = 10 << 20
+	}
+	if cfg.MaxFiles <= 0 {
+		cfg.MaxFiles = 4
+	}
 	if cfg.Title == "" {
 		cfg.Title = "Chat"
 	}
@@ -132,6 +147,7 @@ func New(cfg Config, host Host, log *slog.Logger) (*Channel, error) {
 		signer:         newSigner(cfg.Secret, cfg.AccessCode),
 		hub:            newHub(),
 		orderer:        channel.NewOrderer(),
+		uploads:        make(chan struct{}, 4),
 		sendLimiter:    ratelimit.New(cfg.IPRate, time.Minute),
 		loginLimiter:   ratelimit.New(10, time.Minute),
 		sessionLimiter: ratelimit.New(cfg.NewSessionsPerHour, time.Hour),
@@ -262,6 +278,10 @@ func (c *Channel) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"needsCode":  c.needsCode(),
 		"authed":     authed,
 		"strings":    c.cfg.Strings,
+
+		"attachments":  c.cfg.Attachments,
+		"maxFiles":     c.cfg.MaxFiles,
+		"maxFileBytes": c.cfg.MaxUploadBytes,
 	})
 }
 
@@ -387,15 +407,32 @@ func (c *Channel) handleSend(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusTooManyRequests, "too many messages")
 		return
 	}
-	var req struct {
-		Text string `json:"text"`
+	var text string
+	var files []channel.Attachment
+	if c.cfg.Attachments && isMultipart(r) {
+		select {
+		case c.uploads <- struct{}{}:
+			defer func() { <-c.uploads }()
+		default:
+			w.Header().Set("Retry-After", "5")
+			fail(w, http.StatusServiceUnavailable, "busy")
+			return
+		}
+		var ok bool
+		if text, files, ok = c.readUpload(w, r); !ok {
+			return
+		}
+	} else {
+		var req struct {
+			Text string `json:"text"`
+		}
+		if !readJSON(w, r, &req) {
+			return
+		}
+		text = strings.TrimSpace(req.Text)
 	}
-	if !readJSON(w, r, &req) {
-		return
-	}
-	text := strings.TrimSpace(req.Text)
 	switch {
-	case text == "" || !utf8.ValidString(text):
+	case (text == "" && len(files) == 0) || !utf8.ValidString(text):
 		fail(w, http.StatusBadRequest, "empty message")
 		return
 	case utf8.RuneCountInString(text) > c.cfg.MaxMessage:
@@ -431,14 +468,15 @@ func (c *Channel) handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sink(ctx, channel.Incoming{
-			Accepted:  accepted,
-			Channel:   "web",
-			ChatID:    id,
-			UserID:    id,
-			Text:      text,
-			Addressed: true,
-			Origin:    origin,
-			Responder: &responder{c: c, id: id},
+			Accepted:    accepted,
+			Channel:     "web",
+			ChatID:      id,
+			UserID:      id,
+			Text:        text,
+			Attachments: files,
+			Addressed:   true,
+			Origin:      origin,
+			Responder:   &responder{c: c, id: id},
 		})
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
@@ -530,4 +568,81 @@ func (r *responder) Send(_ context.Context, text string) error {
 func (r *responder) Typing(context.Context) error {
 	r.c.hub.publish(r.id, "typing", map[string]bool{"typing": true})
 	return nil
+}
+
+func isMultipart(r *http.Request) bool {
+	mt := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	return mt == "multipart/form-data"
+}
+
+// readUpload reads a message with files, streaming the parts so that nothing
+// larger than the limits is ever held in memory. It answers the error itself.
+func (c *Channel) readUpload(w http.ResponseWriter, r *http.Request) (string, []channel.Attachment, bool) {
+	limit := int64(c.cfg.MaxFiles)*c.cfg.MaxUploadBytes + maxBodyBytes + 64<<10
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	mr, err := r.MultipartReader()
+	if err != nil {
+		fail(w, http.StatusBadRequest, "invalid upload")
+		return "", nil, false
+	}
+	tooBig := func(err error) bool {
+		var mb *http.MaxBytesError
+		return errors.As(err, &mb)
+	}
+	var text string
+	var files []channel.Attachment
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			if tooBig(err) {
+				fail(w, http.StatusRequestEntityTooLarge, "upload too large")
+			} else {
+				fail(w, http.StatusBadRequest, "invalid upload")
+			}
+			return "", nil, false
+		}
+		switch part.FormName() {
+		case "text":
+			b, err := io.ReadAll(io.LimitReader(part, maxBodyBytes+1))
+			if err != nil || len(b) > maxBodyBytes {
+				fail(w, http.StatusRequestEntityTooLarge, "message too long")
+				return "", nil, false
+			}
+			text = strings.TrimSpace(string(b))
+		case "files":
+			if len(files) >= c.cfg.MaxFiles {
+				fail(w, http.StatusRequestEntityTooLarge, "too many files")
+				return "", nil, false
+			}
+			b, err := io.ReadAll(io.LimitReader(part, c.cfg.MaxUploadBytes+1))
+			if err != nil {
+				if tooBig(err) {
+					fail(w, http.StatusRequestEntityTooLarge, "file too large")
+				} else {
+					fail(w, http.StatusBadRequest, "invalid upload")
+				}
+				return "", nil, false
+			}
+			if int64(len(b)) > c.cfg.MaxUploadBytes {
+				fail(w, http.StatusRequestEntityTooLarge, "file too large")
+				return "", nil, false
+			}
+			data := b
+			files = append(files, channel.Attachment{
+				Name: part.FileName(), MIME: part.Header.Get("Content-Type"), Size: int64(len(data)),
+				Fetch: func(_ context.Context, max int64) ([]byte, error) {
+					if int64(len(data)) > max {
+						return nil, channel.ErrTooLarge
+					}
+					return data, nil
+				},
+			})
+		default:
+			_, _ = io.Copy(io.Discard, io.LimitReader(part, 1<<10))
+		}
+	}
+	return text, files, true
 }

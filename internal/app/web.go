@@ -26,7 +26,7 @@ func (h webHistory) Recent(ctx context.Context, chatID string, n int) ([]web.Tur
 	err := h.sessions.Peek("web", chatID, func(s *session.Session) error {
 		turns, err := s.Recent(ctx, n)
 		for _, t := range turns {
-			out = append(out, web.Turn{Role: t.Role, Text: t.Text})
+			out = append(out, web.Turn{Role: t.Role, Text: t.Text, Attachments: t.Attachments})
 		}
 		return err
 	})

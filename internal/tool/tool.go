@@ -20,6 +20,9 @@ type CallContext struct {
 	// user comes from, which limits should be keyed on instead of the user.
 	Origin string
 	Lang   string
+	// Attachments gives access to the files sent in this chat; nil when the
+	// chat has none or the feature is off.
+	Attachments AttachmentSource
 }
 
 // Tool is a function the model may call.

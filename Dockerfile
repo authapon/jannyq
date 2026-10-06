@@ -15,8 +15,13 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
 # Tools available to commands. Add your own with --build-arg SANDBOX_PACKAGES="...".
 FROM alpine:3.21 AS sandbox
 ARG SANDBOX_PACKAGES="bash python3 curl jq bc coreutils findutils grep sed gawk tar gzip zip unzip file tree openssl sqlite"
+# The bot has the sandbox read the PDFs that users send (text extraction, page pictures, OCR of scans),
+# so that a hostile file is parsed here, away from its secrets. Add OCR languages with
+# --build-arg OCR_PACKAGES="tesseract-ocr tesseract-ocr-data-eng tesseract-ocr-data-tha tesseract-ocr-data-deu"
+ARG PDF_PACKAGES="poppler-utils"
+ARG OCR_PACKAGES="tesseract-ocr tesseract-ocr-data-eng tesseract-ocr-data-tha"
 # tini is PID 1 so that processes left behind by commands are reaped (no zombies).
-RUN apk add --no-cache tini ca-certificates tzdata ${SANDBOX_PACKAGES} \
+RUN apk add --no-cache tini ca-certificates tzdata ${SANDBOX_PACKAGES} ${PDF_PACKAGES} ${OCR_PACKAGES} \
  && mkdir -p /work /skills \
  && chmod 711 /work
 COPY --from=build /out/jannyq /usr/local/bin/jannyq
