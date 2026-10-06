@@ -1,0 +1,40 @@
+# The command executor. Starts as root ONLY so that it can run each chat's commands as its own unprivileged user;
+# everything else is dropped. Its token is in /etc/jannyq/sandbox.env (JANNYQ_SANDBOX_TOKEN=..., chmod 600).
+# Example only: not run in the environment where it was written. For stronger isolation run it on its own machine or in gVisor.
+[Unit]
+Description=jannyq sandbox (runs the model's shell commands)
+After=network.target
+
+[Service]
+EnvironmentFile=/etc/jannyq/sandbox.env
+Environment=JANNYQ_SANDBOX_LISTEN=127.0.0.1:9090
+Environment=JANNYQ_SANDBOX_WORKDIR=/var/lib/jannyq-sandbox
+ExecStart=/usr/local/bin/jannyq sandbox
+Restart=on-failure
+RestartSec=5
+StateDirectory=jannyq-sandbox
+StateDirectoryMode=0711
+
+# Capabilities needed to start commands as other users and to own their directories
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+ReadWritePaths=/var/lib/jannyq-sandbox
+# Commands must not reach the network from here unless you mean it:
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+# Resource ceiling for everything the commands do
+MemoryMax=1G
+TasksMax=512
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

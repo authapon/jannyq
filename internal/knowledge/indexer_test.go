@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/authapon/jannyq/internal/attach"
+	"github.com/authapon/jannyq/internal/metrics"
 )
 
 // bagEmbedder embeds text as a hashed bag of words, so that texts sharing words
@@ -499,4 +500,29 @@ func TestMissingFolderIsAnError(t *testing.T) {
 	if st, _ := r.kb.Store.Stats(bg); st.Files != 1 {
 		t.Errorf("an unavailable folder wiped the index: %+v", st)
 	}
+}
+
+func TestIndexerMetrics(t *testing.T) {
+	r := newRig(t, false)
+	reg := metrics.New()
+	r.ix.cfg.Metrics = metrics.NewInstruments(reg)
+	r.ix.cfg.Interval = 20 * time.Millisecond
+	r.ix.now = time.Now
+	r.write("a.txt", "Some words about kestrels and falcons.")
+	r.write("broken.pdf", fixturePDF(t, "corrupt.pdf"))
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan struct{})
+	go func() { r.ix.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	for i := 0; i < 200; i++ {
+		out := reg.Render()
+		if strings.Contains(out, `jannyq_knowledge_changes_total{change="added"} 1`) && strings.Contains(out, `jannyq_knowledge_scans_total{result="ok"}`) {
+			if !strings.Contains(out, `change="failed"} 1`) {
+				t.Errorf("a failed file is not counted:\n%s", out)
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("the scan was not counted:\n%s", reg.Render())
 }

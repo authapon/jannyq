@@ -13,6 +13,7 @@ import (
 	"github.com/authapon/jannyq/internal/config"
 	"github.com/authapon/jannyq/internal/knowledge"
 	"github.com/authapon/jannyq/internal/llm"
+	"github.com/authapon/jannyq/internal/metrics"
 	"github.com/authapon/jannyq/internal/sandbox"
 	"github.com/authapon/jannyq/internal/tool"
 )
@@ -56,7 +57,7 @@ func newEmbedder(cfg *config.Config) llm.Embedder {
 
 // newKnowledge opens the knowledge database and prepares the folder watcher.
 // It returns nil when --knowledge-dir is not set.
-func newKnowledge(ctx context.Context, cfg *config.Config, cr *commandRunner, log *slog.Logger) (*knowledgeBase, error) {
+func newKnowledge(ctx context.Context, cfg *config.Config, cr *commandRunner, inst metrics.Instruments, log *slog.Logger) (*knowledgeBase, error) {
 	if cfg.KnowledgeDir == "" {
 		return nil, nil
 	}
@@ -98,6 +99,7 @@ func newKnowledge(ctx context.Context, cfg *config.Config, cr *commandRunner, lo
 		Interval:     cfg.KnowledgeInterval,
 		MaxFileBytes: int64(cfg.KnowledgeMaxFileMB) << 20,
 		Log:          log,
+		Metrics:      inst,
 	}, kb)
 	if err != nil {
 		store.Close()

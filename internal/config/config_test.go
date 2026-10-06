@@ -456,3 +456,23 @@ func TestMessengerAndWhatsAppSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestOperationsSettings(t *testing.T) {
+	base := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	c, err := load(t, nil, base)
+	if err != nil || c.MetricsListen != "" || c.BackupDir != "" || c.RetentionDays != 0 || c.BackupKeep != 7 || !c.BackupFiles {
+		t.Fatalf("%v %+v", err, c)
+	}
+	if c, err = load(t, []string{"--backup-dir=/b", "--metrics-listen=127.0.0.1:9100", "--retention-days=90"}, base); err != nil ||
+		c.BackupInterval != 24*time.Hour || c.RetentionDays != 90 {
+		t.Fatalf("%v %+v", err, c)
+	}
+	for _, bad := range [][]string{
+		{"--retention-days=-1"}, {"--backup-dir=/b", "--backup-interval=10s"}, {"--backup-dir=/b", "--backup-keep=0"},
+		{"--metrics-listen=:9100", "--metrics-token=abc"},
+	} {
+		if _, err := load(t, bad, base); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+}

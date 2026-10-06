@@ -1,0 +1,46 @@
+# The bot. Settings (JANNYQ_*) come from /etc/jannyq/jannyq.env (chmod 600, owned by root).
+# Example only: not run in the environment where it was written. Check with:  systemd-analyze security jannyq.service
+[Unit]
+Description=jannyq chat bot
+After=network-online.target jannyq-sandbox.service
+Wants=network-online.target
+
+[Service]
+User=jannyq
+Group=jannyq
+EnvironmentFile=/etc/jannyq/jannyq.env
+Environment=JANNYQ_DATA_DIR=/var/lib/jannyq
+ExecStart=/usr/local/bin/jannyq
+Restart=on-failure
+RestartSec=5
+UMask=0027
+StateDirectory=jannyq
+StateDirectoryMode=0750
+
+# Sandboxing of the process itself
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+ReadWritePaths=/var/lib/jannyq /var/backups/jannyq
+# Reading the knowledge folder and skills needs read access only; add them here if they live elsewhere:
+# ReadOnlyPaths=/srv/knowledge /srv/skills
+
+[Install]
+WantedBy=multi-user.target

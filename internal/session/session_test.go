@@ -327,7 +327,9 @@ func TestPeekDoesNotWaitForARunningRequest(t *testing.T) {
 	<-started
 
 	got := make(chan []Turn, 1)
+	peeked := make(chan struct{})
 	go func() {
+		defer close(peeked)
 		_ = m.Peek("c", "1", func(s *Session) error {
 			turns, _ := s.Recent(ctx, 5)
 			got <- turns
@@ -344,6 +346,7 @@ func TestPeekDoesNotWaitForARunningRequest(t *testing.T) {
 	}
 	close(release)
 	<-done
+	<-peeked // Peek has returned and released its place in the queue
 	if err := m.With(ctx, "c", "1", func(*Session) error { return nil }); err != nil {
 		t.Errorf("Peek left the queue in a bad state: %v", err)
 	}
@@ -759,5 +762,98 @@ func TestVersion1DatabasesGainTheAttachmentsTable(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSweepDeletesIdleChatsOnly(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir, 8, 4)
+	defer m.Close()
+	ctx := context.Background()
+	write := func(channel, chat string) {
+		if err := m.With(ctx, channel, chat, func(s *Session) error {
+			if _, err := s.FilesDir(); err != nil {
+				return err
+			}
+			return s.Append(ctx, llm.Message{Role: llm.RoleUser, Content: "hi"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("telegram", "old")
+	write("telegram", "fresh")
+	write("web", "old2")
+	if m.OpenCount() != 3 {
+		t.Errorf("open = %d", m.OpenCount())
+	}
+	// "old" and "old2" were last written 40 days ago
+	past := time.Now().Add(-40 * 24 * time.Hour)
+	for _, rel := range []string{"telegram", "web"} {
+		entries, _ := os.ReadDir(filepath.Join(dir, rel))
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "old") {
+				for _, f := range []string{"session.db", "session.db-wal"} {
+					_ = os.Chtimes(filepath.Join(dir, rel, e.Name(), f), past, past)
+				}
+			}
+		}
+	}
+	// a directory that is not a chat is left alone
+	if err := os.MkdirAll(filepath.Join(dir, "telegram", "not-a-chat"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	n, err := m.Sweep(30*24*time.Hour, time.Now())
+	if err != nil || n != 2 {
+		t.Fatalf("deleted %d: %v", n, err)
+	}
+	if m.Exists("telegram", "old") || m.Exists("web", "old2") || !m.Exists("telegram", "fresh") {
+		t.Error("the wrong chats were deleted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "telegram", "not-a-chat")); err != nil {
+		t.Error("a directory that is not a chat was deleted")
+	}
+	if m.OpenCount() != 1 {
+		t.Errorf("open = %d: databases of deleted chats must be closed", m.OpenCount())
+	}
+	// the chat starts afresh when its person comes back
+	write("telegram", "old")
+	var count int
+	_ = m.With(ctx, "telegram", "old", func(s *Session) error { count, _ = s.Count(ctx); return nil })
+	if count != 1 {
+		t.Errorf("a deleted chat kept %d messages", count)
+	}
+}
+
+func TestSweepSparesChatsInUse(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir, 8, 4)
+	defer m.Close()
+	ctx := context.Background()
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.With(ctx, "telegram", "busy", func(s *Session) error {
+			_ = s.Append(ctx, llm.Message{Role: llm.RoleUser, Content: "working"})
+			past := time.Now().Add(-99 * 24 * time.Hour)
+			_ = os.Chtimes(filepath.Join(s.Dir(), "session.db"), past, past)
+			_ = os.Chtimes(filepath.Join(s.Dir(), "session.db-wal"), past, past)
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	n, err := m.Sweep(time.Hour, time.Now())
+	close(release)
+	<-done
+	if err != nil || n != 0 || !m.Exists("telegram", "busy") {
+		t.Errorf("a chat that is being served was deleted: %d %v", n, err)
+	}
+}
+
+func TestSweepOfAMissingDirectory(t *testing.T) {
+	m := NewManager(filepath.Join(t.TempDir(), "nope"), 8, 4)
+	if n, err := m.Sweep(time.Hour, time.Now()); n != 0 || err != nil {
+		t.Errorf("%d %v", n, err)
 	}
 }

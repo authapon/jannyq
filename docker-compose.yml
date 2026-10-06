@@ -35,10 +35,14 @@ services:
       JANNYQ_SKILLS_DIR: /skills
       # Shared knowledge base: put text and PDF files in ./knowledge (edits and deletions are followed).
       JANNYQ_KNOWLEDGE_DIR: /knowledge
+      # A backup every day, the newest 7 kept. They are on the same disk as the data: copy them elsewhere too
+      # (see docs/DEPLOYMENT.md).
+      JANNYQ_BACKUP_DIR: /backups
       # The web chat is off here; docker-compose.public.yml turns it on behind HTTPS.
       JANNYQ_WEB: ${JANNYQ_WEB:-false}
     volumes:
       - jannyq-data:/data
+      - jannyq-backups:/backups
       - ./skills:/skills:ro
       - ./knowledge:/knowledge:ro
     depends_on:
@@ -150,5 +154,6 @@ networks:
 
 volumes:
   jannyq-data:
+  jannyq-backups:
   sandbox-work:
   ollama-models:

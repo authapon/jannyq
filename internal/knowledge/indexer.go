@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/authapon/jannyq/internal/metrics"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -57,6 +58,8 @@ type IndexerConfig struct {
 	// failure (default 5 minutes).
 	EmbedRetry time.Duration
 	Log        *slog.Logger
+	// Metrics counts scans and changes.
+	Metrics metrics.Instruments
 }
 
 // Indexer keeps the knowledge base in step with a folder.
@@ -143,10 +146,18 @@ func (ix *Indexer) Run(ctx context.Context) {
 		case ctx.Err() != nil:
 			return
 		case err != nil:
+			ix.cfg.Metrics.KnowledgeScans.Inc("error")
 			ix.log.Error("scan failed", "dir", ix.cfg.Dir, "err", err)
 		case res.Changed():
+			for change, n := range map[string]int{"added": res.Added, "edited": res.Edited, "removed": res.Removed,
+				"renamed": res.Renamed, "failed": res.Failed, "embedded": res.Embedded} {
+				ix.cfg.Metrics.KnowledgeChanges.Add(float64(n), change)
+			}
 			ix.log.Info("knowledge base updated", "added", res.Added, "changed", res.Edited, "removed", res.Removed,
 				"renamed", res.Renamed, "failed", res.Failed, "files", res.Files)
+		}
+		if err == nil {
+			ix.cfg.Metrics.KnowledgeScans.Inc("ok")
 		}
 		wait := ix.cfg.Interval
 		if res.Unsettled > 0 && ix.cfg.Settle+time.Second < wait {
@@ -444,6 +455,7 @@ func (ix *Indexer) indexFile(ctx context.Context, root *os.Root, f sourceFile, o
 				return outSkipped
 			}
 			*embedDown = true
+			ix.cfg.Metrics.EmbedFailures.Inc()
 			ix.embedRetryAt[f.rel] = ix.now().Add(ix.cfg.EmbedRetry)
 			ix.log.Warn("could not embed a file; it is searchable by words and will be embedded later", "path", f.rel, "err", err)
 		} else {
@@ -495,6 +507,7 @@ func (ix *Indexer) reembed(ctx context.Context, row File, embedDown *bool) bool 
 	if err != nil {
 		if ctx.Err() == nil {
 			*embedDown = true
+			ix.cfg.Metrics.EmbedFailures.Inc()
 			ix.embedRetryAt[row.Path] = ix.now().Add(ix.cfg.EmbedRetry)
 			ix.log.Warn("could not embed a file; will try again later", "path", row.Path, "err", err)
 		}

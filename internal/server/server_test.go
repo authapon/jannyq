@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/authapon/jannyq/internal/metrics"
 	"io"
 	"log/slog"
 	"net/http"
@@ -204,5 +205,24 @@ func TestExemptPathsAreNotLimited(t *testing.T) {
 	do("GET", "/x")
 	if c := do("GET", "/x"); c != 429 {
 		t.Errorf("other paths stay limited: %d", c)
+	}
+}
+
+func TestRequestsAreCountedByClass(t *testing.T) {
+	reg := metrics.New()
+	c := reg.Counter("req_total", "r", "class")
+	s := New(Options{Addr: ":0", Log: quiet(), Requests: c})
+	s.Mux().HandleFunc("GET /ok", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
+	s.Mux().HandleFunc("GET /boom", func(w http.ResponseWriter, _ *http.Request) { panic("x") })
+	h := s.Handler()
+	for _, p := range []string{"/ok", "/ok", "/missing", "/boom"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+	}
+	out := reg.Render()
+	for _, want := range []string{`req_total{class="2xx"} 2`, `req_total{class="4xx"} 1`, `req_total{class="5xx"} 1`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("lacks %q:\n%s", want, out)
+		}
 	}
 }

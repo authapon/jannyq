@@ -30,6 +30,16 @@ func run() int {
 	if len(os.Args) > 1 && os.Args[1] == sandbox.HelperArg {
 		return sandbox.HelperMain(os.Args[2:]) // internal: used by the sandbox executor
 	}
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "backup":
+			return runBackup(os.Args[2:], os.Stdout, os.Stderr)
+		case "restore":
+			return runRestore(os.Args[2:], os.Stdout, os.Stderr)
+		case "verify":
+			return runVerify(os.Args[2:], os.Stdout, os.Stderr)
+		}
+	}
 	if len(os.Args) > 1 && os.Args[1] == "sandbox" {
 		return runSandbox(os.Args[2:])
 	}

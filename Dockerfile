@@ -41,15 +41,15 @@ FROM alpine:3.21 AS runtime
 # Tools needed by the bot itself. Commands run in the separate sandbox image, not here.
 RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -u 10001 jannyq \
- && mkdir -p /data /knowledge /skills \
- && chown jannyq:jannyq /data
+ && mkdir -p /data /backups /knowledge /skills \
+ && chown jannyq:jannyq /data /backups
 COPY --from=build /out/jannyq /usr/local/bin/jannyq
 
 USER jannyq
 WORKDIR /data
 ENV JANNYQ_DATA_DIR=/data \
     JANNYQ_LISTEN=:8080
-VOLUME ["/data"]
+VOLUME ["/data", "/backups"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1

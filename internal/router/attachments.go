@@ -160,10 +160,12 @@ func (r *Router) ingest(ctx context.Context, s *session.Session, in channel.Inco
 		}
 		switch {
 		case i >= st.cfg.MaxPerMessage:
+			r.cfg.Metrics.Attachments.Inc("unknown", "skipped")
 			r.markUnread(ctx, s, msgID, name, "too many files in one message")
 			tooMany = true
 			continue
 		case !st.limiter.Allow(limiterKey):
+			r.cfg.Metrics.Attachments.Inc("unknown", "skipped")
 			r.markUnread(ctx, s, msgID, name, "the user is sending files too quickly")
 			limited = true
 			continue
@@ -172,6 +174,7 @@ func (r *Router) ingest(ctx context.Context, s *session.Session, in channel.Inco
 			if ctx.Err() != nil {
 				return read
 			}
+			r.cfg.Metrics.Attachments.Inc("unknown", "failed")
 			r.log.Info("attachment not read", "channel", in.Channel, "chat", in.ChatID, "name", name, "err", err)
 			fail(err)
 			continue
@@ -274,6 +277,7 @@ func (r *Router) readOne(ctx context.Context, s *session.Session, in channel.Inc
 		cleanup()
 		return err
 	}
+	r.cfg.Metrics.Attachments.Inc(res.Kind, "read")
 	if r.attach.cfg.Inbox != nil && len(inboxData) > 0 {
 		if err := r.attach.cfg.Inbox(ctx, workspace, attach.InboxPath(id, res.Name, res.Kind), inboxData); err != nil {
 			r.log.Warn("could not copy an attachment to the command workspace", "err", err)

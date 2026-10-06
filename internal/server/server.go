@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/authapon/jannyq/internal/metrics"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,6 +32,8 @@ type Options struct {
 	// /healthz; 0 or less disables the limit.
 	RatePerMinute int
 	Log           *slog.Logger
+	// Requests, when set, counts requests by status class ("2xx", ...).
+	Requests *metrics.Counter
 }
 
 // Server is an HTTP server with a mux that channels add routes to.
@@ -87,7 +90,20 @@ func (s *Server) Handler() http.Handler {
 	h = s.securityHeaders(h)
 	h = s.accessLog(h)
 	h = s.recoverPanics(h)
+	h = s.count(h) // outside the recovery, so that a panic is counted as the 500 it became
 	return h
+}
+
+// count counts requests by the class of their status.
+func (s *Server) count(next http.Handler) http.Handler {
+	if s.opts.Requests == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		s.opts.Requests.Inc(strconv.Itoa(sw.status/100) + "xx")
+	})
 }
 
 // Run serves until ctx is cancelled, then shuts down gracefully.

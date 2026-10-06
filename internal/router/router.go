@@ -6,7 +6,9 @@ package router
 import (
 	"context"
 	"errors"
+	"github.com/authapon/jannyq/internal/metrics"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,8 @@ type Config struct {
 	RateLimit      int // messages per user per minute; 0 = unlimited
 	MaxConcurrent  int // simultaneous model runs
 	RequestTimeout time.Duration
+	// Metrics counts messages, answers and files.
+	Metrics metrics.Instruments
 }
 
 // Router handles incoming messages from all channels.
@@ -131,17 +135,20 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	if in.ReceivedAt.IsZero() {
 		in.ReceivedAt = time.Now()
 	}
+	r.cfg.Metrics.MessagesReceived.Inc(in.Channel, strconv.FormatBool(!in.IsGroup || in.Addressed))
 	if in.IsGroup && !in.Addressed && r.cfg.GroupReply != GroupReplyAll {
 		r.record(ctx, in) // not for us, but part of the conversation
 		return
 	}
 	if !r.isAllowed(in) {
+		r.cfg.Metrics.MessagesRejected.Inc(in.Channel, "not_allowed")
 		accept()
 		r.log.Info("message from user that is not allowed", "channel", in.Channel, "user", in.UserID)
 		r.say(ctx, in, r.tr.T("not_allowed"))
 		return
 	}
 	if !r.limiter.Allow(in.Channel + ":" + in.UserID) {
+		r.cfg.Metrics.MessagesRejected.Inc(in.Channel, "rate_limited")
 		accept()
 		r.say(ctx, in, r.tr.T("rate_limited"))
 		return
@@ -202,6 +209,7 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	})
 	switch {
 	case errors.Is(err, session.ErrBusy):
+		r.cfg.Metrics.MessagesRejected.Inc(in.Channel, "busy")
 		r.say(ctx, in, r.tr.T("busy"))
 	case err != nil && ctx.Err() == nil:
 		r.log.Error("session error", "channel", in.Channel, "chat", in.ChatID, "err", err)
@@ -246,14 +254,18 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 	defer cancel()
 	input := r.input(in, text)
 	input.AnswerFor = id
+	start := time.Now()
 	reply, err := r.agent.Respond(reqCtx, s, input)
+	result := "ok"
 	switch {
 	case errors.Is(err, agent.ErrEmptyResponse):
-		reply = r.tr.T("empty_response")
+		reply, result = r.tr.T("empty_response"), "empty"
 	case err != nil:
 		r.log.Error("agent failed", "channel", in.Channel, "chat", in.ChatID, "err", err)
-		reply = r.tr.T("error_generic")
+		reply, result = r.tr.T("error_generic"), "error"
 	}
+	r.cfg.Metrics.Replies.Inc(in.Channel, result)
+	r.cfg.Metrics.RequestSeconds.Since(start, in.Channel)
 	if err := in.Responder.Send(ctx, reply); err != nil {
 		r.log.Error("send failed", "channel", in.Channel, "chat", in.ChatID, "err", err)
 	}

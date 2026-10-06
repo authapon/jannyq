@@ -201,6 +201,13 @@ compose จะเริ่ม jannyq, **sandbox**, SearXNG (เปิดรู�
 - **Docker**: `docker-compose.yml` mount `./knowledge` เป็น `/knowledge` แบบอ่านอย่างเดียว และ `ollama-pull` ดาวน์โหลด
   `JANNYQ_EMBED_MODEL` (`bge-m3` ใน `.env.example`) วางไฟล์ใน `./knowledge` แล้วรอครึ่งนาที
 
+## การดูแลระบบ
+
+คู่มือสำหรับเปิดบอทให้ผู้อื่นใช้อยู่ที่ **[docs/DEPLOYMENT.th.md](docs/DEPLOYMENT.th.md)** (ฉบับเต็มภาษาอังกฤษ [DEPLOYMENT.md](docs/DEPLOYMENT.md)):
+เช็กลิสต์ก่อนเปิดสาธารณะ, monitoring, backup และการซ้อมกู้ข้อมูล, การอัปเกรด, การเก็บข้อมูล และตัวอย่าง systemd
+เครื่องมือที่เกี่ยวข้อง: **metrics** แบบ Prometheus (`--metrics-listen`, `--metrics-token`), `/healthz` และ `/readyz`,
+**backup** (`--backup-dir` และคำสั่ง `jannyq backup`, `jannyq verify`, `jannyq restore --from FILE [--force]`) และ **retention** (`--retention-days`)
+
 ## Web chat
 
 ```sh
@@ -274,4 +281,5 @@ skill จึงมีสคริปต์ให้รันได้ และ�
 5. ✅ **ฐานความรู้ RAG** จากโฟลเดอร์ไฟล์ text/PDF — SQLite, ค้นแบบ vector + full-text, sync เมื่อไฟล์แก้ไข/ลบ/เปลี่ยนชื่อ
 6. ✅ **Discord และ LINE** — ช่องทางแบบ gateway และ webhook รองรับไฟล์แนบ mention และบริบทกลุ่ม
 7. ✅ **Messenger และ WhatsApp** — webhook ของ Meta ตรวจ signature รองรับไฟล์แนบ และใช้ router เดียวกับทุกช่องทาง
-8. Hardening และ operations
+8. ✅ **Hardening และ operations** — metrics แบบ Prometheus, `/readyz`, backup ที่สอดคล้องกันพร้อมการกู้ที่ตรวจครบก่อนแตะข้อมูล, retention, `govulncheck` ใน CI, คู่มือ deploy และ systemd
+   (ตั้งใจไม่ทำ sandbox แบบ container ต่อแชท เพราะต้องให้บอทถือ Docker socket — ดูคู่มือสำหรับ gVisor หรือแยกเครื่อง)

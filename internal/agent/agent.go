@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/authapon/jannyq/internal/metrics"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -68,6 +69,9 @@ type Config struct {
 	// Skills, when set, lists skills in the system prompt (the load_skill
 	// tool must be registered for the model to use them).
 	Skills SkillCatalog
+
+	// Metrics counts model requests, tokens, tool calls and compactions.
+	Metrics metrics.Instruments
 }
 
 // SkillCatalog provides the skill list shown to the model.
@@ -298,15 +302,24 @@ func (a *Agent) buildMessages(in Input, summary string, history []llm.Message, h
 // chat calls the provider, retrying once without tools if the model turns
 // out not to support them (and remembering that for later calls).
 func (a *Agent) chat(ctx context.Context, req llm.Request) (*llm.Response, error) {
+	start := time.Now()
 	resp, err := a.provider.Chat(ctx, req)
 	if errors.Is(err, llm.ErrToolsUnsupported) && len(req.Tools) > 0 {
 		if !a.toolsUnsupported.Swap(true) {
 			a.log.Warn("model does not support tools; continuing without them", "model", req.Model)
 		}
 		req.Tools = nil
-		return a.provider.Chat(ctx, req)
+		resp, err = a.provider.Chat(ctx, req)
 	}
-	return resp, err
+	a.cfg.Metrics.LLMSeconds.Since(start)
+	if err != nil {
+		a.cfg.Metrics.LLMRequests.Inc("error")
+		return resp, err
+	}
+	a.cfg.Metrics.LLMRequests.Inc("ok")
+	a.cfg.Metrics.LLMTokens.Add(float64(resp.Usage.PromptTokens), "prompt")
+	a.cfg.Metrics.LLMTokens.Add(float64(resp.Usage.CompletionTokens), "completion")
+	return resp, nil
 }
 
 // runTool executes one tool call and returns the text to give the model.
@@ -316,6 +329,14 @@ func (a *Agent) runTool(ctx context.Context, cc tool.CallContext, tc llm.ToolCal
 		if r := recover(); r != nil {
 			result = fmt.Sprintf("Error: tool %s crashed: %v", tc.Name, r)
 		}
+		name, outcome := tc.Name, "ok"
+		if _, known := a.tools.Get(name); !known {
+			name = "unknown" // the model made the name up: do not let it create series
+		}
+		if strings.HasPrefix(result, "Error: ") {
+			outcome = "error"
+		}
+		a.cfg.Metrics.ToolCalls.Inc(name, outcome)
 		a.log.Info("tool call", "tool", tc.Name, "chat", cc.SessionKey, "user", cc.UserID,
 			"duration", time.Since(start).Round(time.Millisecond), "bytes", len(result))
 	}()

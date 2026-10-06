@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build test vet fmt run docker clean
+.PHONY: build test vet fmt run docker clean vuln
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/jannyq ./cmd/jannyq
@@ -17,6 +17,10 @@ fmt:
 # Chat in the terminal. Example: make run MODEL=qwen3:8b
 run:
 	go run ./cmd/jannyq --cli --llm-model $(MODEL)
+
+# Known vulnerabilities in the dependencies and the standard library that the code really uses.
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t jannyq:latest .

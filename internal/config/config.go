@@ -117,6 +117,15 @@ type Config struct {
 	KnowledgePDFPages   int
 	KnowledgeOCRPages   int
 
+	// Operations
+	MetricsListen  string
+	MetricsToken   string
+	BackupDir      string
+	BackupInterval time.Duration
+	BackupKeep     int
+	BackupFiles    bool
+	RetentionDays  int
+
 	// Channels
 	TelegramToken string
 	TelegramAPI   string
@@ -359,6 +368,15 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.integer(&c.KnowledgePDFPages, "knowledge-pdf-max-pages", 1000, "longest PDF indexed, in pages")
 	l.integer(&c.KnowledgeOCRPages, "knowledge-ocr-pages", 100, "pages of one scanned PDF that are recognised with OCR; 0 turns OCR off for the knowledge base")
 
+	// Operations
+	l.str(&c.MetricsListen, "metrics-listen", "", "address for Prometheus metrics at /metrics, e.g. 127.0.0.1:9100; empty disables them (keep it off the public internet)")
+	l.secret(&c.MetricsToken, "metrics-token", "bearer token required to read the metrics; empty = no check")
+	l.str(&c.BackupDir, "backup-dir", "", "folder for automatic backups of the chats, knowledge base and secrets; empty disables them")
+	l.duration(&c.BackupInterval, "backup-interval", 24*time.Hour, "time between automatic backups")
+	l.integer(&c.BackupKeep, "backup-keep", 7, "automatic backups kept; older ones are deleted")
+	l.boolean(&c.BackupFiles, "backup-files", true, "include the files users sent (they can be large)")
+	l.integer(&c.RetentionDays, "retention-days", 0, "delete chats (messages and files) idle for this many days; 0 keeps them for ever")
+
 	// Channels
 	l.secret(&c.TelegramToken, "telegram-token", "Telegram bot token; enables the Telegram channel")
 	l.str(&c.TelegramAPI, "telegram-api", "https://api.telegram.org", "Telegram Bot API base URL")
@@ -527,6 +545,20 @@ func (c *Config) validate() error {
 		bad("--rate-limit must not be negative")
 	}
 	c.validateMeta(bad)
+	if c.RetentionDays < 0 {
+		bad("--retention-days must not be negative")
+	}
+	if c.BackupDir != "" {
+		if c.BackupInterval < time.Minute {
+			bad("--backup-interval must be at least 1m")
+		}
+		if c.BackupKeep < 1 {
+			bad("--backup-keep must be at least 1")
+		}
+	}
+	if c.MetricsListen != "" && c.MetricsToken != "" && len(c.MetricsToken) < 8 {
+		bad("--metrics-token must be at least 8 characters")
+	}
 	if (c.LineSecret == "") != (c.LineToken == "") {
 		bad("the LINE channel needs both --line-channel-secret and --line-channel-token")
 	}

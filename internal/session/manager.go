@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -175,4 +176,93 @@ func (m *Manager) Close() error {
 		delete(m.entries, k)
 	}
 	return first
+}
+
+// OpenCount returns the number of chats whose database is open.
+func (m *Manager) OpenCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, e := range m.entries {
+		if e.s != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// lastActivity is when a chat's database was last written.
+func lastActivity(dir string) (time.Time, bool) {
+	var last time.Time
+	found := false
+	for _, name := range []string{"session.db", "session.db-wal"} {
+		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			found = true
+			if fi.ModTime().After(last) {
+				last = fi.ModTime()
+			}
+		}
+	}
+	return last, found
+}
+
+// Sweep deletes the chats (database and files) that have not been written to
+// for olderThan. Chats in use are never touched. It returns how many were
+// deleted. Directories that are not chats (no session.db) are left alone.
+func (m *Manager) Sweep(olderThan time.Duration, now time.Time) (int, error) {
+	channels, err := os.ReadDir(m.dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	deleted := 0
+	for _, ch := range channels {
+		if !ch.IsDir() {
+			continue
+		}
+		chats, err := os.ReadDir(filepath.Join(m.dir, ch.Name()))
+		if err != nil {
+			continue
+		}
+		for _, c := range chats {
+			dir := filepath.Join(m.dir, ch.Name(), c.Name())
+			if !c.IsDir() {
+				continue
+			}
+			last, ok := lastActivity(dir)
+			if !ok || now.Sub(last) < olderThan {
+				continue
+			}
+			if m.removeIdle(dir) {
+				deleted++
+			}
+		}
+	}
+	return deleted, nil
+}
+
+// removeIdle deletes a chat directory unless the chat is in use. The lock is
+// held throughout, so nobody can start using the chat in between.
+func (m *Manager) removeIdle(dir string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
+	for key, e := range m.entries {
+		ch, id, _ := strings.Cut(key, "\x00")
+		if sessionDir(m.dir, ch, id) != dir {
+			continue
+		}
+		if e.refs > 0 {
+			return false
+		}
+		if e.s != nil {
+			_ = e.s.close()
+		}
+		delete(m.entries, key)
+	}
+	return os.RemoveAll(dir) == nil
 }

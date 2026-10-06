@@ -83,6 +83,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	if err != nil {
 		return err
 	}
+	reg, inst := newMetrics(cfg, version)
 	tools := NewTools(cfg, version)
 	if cfg.FetchAllowPrivate {
 		log.Warn("web_fetch may reach private addresses (--fetch-allow-private)")
@@ -128,7 +129,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		log.Info("skills loaded", "dir", cfg.SkillsDir, "count", len(skills.Summaries()))
 	}
 
-	kbase, err := newKnowledge(ctx, cfg, runner, log)
+	kbase, err := newKnowledge(ctx, cfg, runner, inst, log)
 	if err != nil {
 		return err
 	}
@@ -160,6 +161,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		CompactRatio:  cfg.CompactRatio,
 		CompactKeep:   cfg.CompactKeep,
 		ToolMaxOutput: cfg.ToolMaxOutput,
+		Metrics:       inst,
 	}
 	if skills != nil {
 		acfg.Skills = skills
@@ -180,6 +182,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	if err := os.MkdirAll(sessionsDir, 0o750); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+	checkDataDir(cfg.DataDir, log)
 	sessions := session.NewManager(sessionsDir, cfg.MaxOpenSessions, 4)
 	defer sessions.Close()
 
@@ -192,7 +195,9 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		RateLimit:      cfg.RateLimit,
 		MaxConcurrent:  cfg.MaxConcurrent,
 		RequestTimeout: cfg.RequestTimeout,
+		Metrics:        inst,
 	}, sessions, ag, tr, log)
+	registerGauges(reg, sessions, kbase)
 	if runner != nil {
 		rt.SetWorkspaceReset(runner.runner.Reset)
 	}
@@ -207,8 +212,13 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 			return fmt.Errorf("trusted proxies: %w", err)
 		}
 		srv = server.New(server.Options{
-			Addr: cfg.Listen, Version: version, TrustedProxies: proxies, RatePerMinute: cfg.HTTPRate, Log: log,
+			Addr: cfg.Listen, Version: version, TrustedProxies: proxies, RatePerMinute: cfg.HTTPRate, Log: log, Requests: inst.HTTPRequests,
 		})
+	}
+
+	if srv != nil {
+		srv.Mux().Handle("GET /readyz", readyHandler(cfg.DataDir, kbase))
+		srv.ExemptFromRateLimit("/readyz")
 	}
 
 	var channels []channel.Channel
@@ -315,6 +325,31 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 				errc <- fmt.Errorf("http server: %w", err)
 			}
 		}()
+	}
+	if reg != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := serveMetrics(runCtx, cfg, reg, log); err != nil {
+				errc <- fmt.Errorf("metrics server: %w", err)
+			}
+		}()
+	}
+	if cfg.BackupDir != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runBackups(runCtx, cfg, version, inst, reg, log)
+		}()
+		log.Info("automatic backups on", "dir", cfg.BackupDir, "every", cfg.BackupInterval, "keep", cfg.BackupKeep)
+	}
+	if cfg.RetentionDays > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runRetention(runCtx, cfg, sessions, inst, log)
+		}()
+		log.Info("idle chats are deleted after", "days", cfg.RetentionDays)
 	}
 	if kbase != nil {
 		wg.Add(1)

@@ -422,7 +422,11 @@ func TestAuthenticationIsRequired(t *testing.T) {
 		if name == "tampered" {
 			h.start()
 			v := h.cookieValue()
-			value = "b" + v[1:]
+			flip := "b"
+			if v[0] == 'b' { // the random id may start with any hex digit: make sure it really changes
+				flip = "c"
+			}
+			value = flip + v[1:]
 		}
 		code, _ := h.json("POST", "/api/send", `{"text":"hi"}`, map[string]string{"Cookie": cookieName + "=" + value})
 		if code != 401 && name == "forged" {

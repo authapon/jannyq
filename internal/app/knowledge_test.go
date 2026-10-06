@@ -10,6 +10,7 @@ import (
 
 	"github.com/authapon/jannyq/internal/config"
 	"github.com/authapon/jannyq/internal/llm"
+	"github.com/authapon/jannyq/internal/metrics"
 	"github.com/authapon/jannyq/internal/tool"
 )
 
@@ -46,7 +47,7 @@ func TestNewKnowledge(t *testing.T) {
 	}
 	old := timeAgo()
 	_ = os.Chtimes(filepath.Join(dir, "a.txt"), old, old)
-	k, err := newKnowledge(context.Background(), cfg, nil, quiet())
+	k, err := newKnowledge(context.Background(), cfg, nil, metrics.NewInstruments(nil), quiet())
 	if err != nil || k == nil {
 		t.Fatalf("%v", err)
 	}
@@ -71,11 +72,11 @@ func TestNewKnowledge(t *testing.T) {
 		t.Errorf("%v\n%s", err, out)
 	}
 	// off without a folder; an error for a folder that does not exist
-	if k2, err := newKnowledge(context.Background(), &config.Config{}, nil, quiet()); k2 != nil || err != nil {
+	if k2, err := newKnowledge(context.Background(), &config.Config{}, nil, metrics.NewInstruments(nil), quiet()); k2 != nil || err != nil {
 		t.Errorf("disabled: %v %v", k2, err)
 	}
 	cfg.KnowledgeDir = filepath.Join(dir, "missing")
-	if _, err := newKnowledge(context.Background(), cfg, nil, quiet()); err == nil {
+	if _, err := newKnowledge(context.Background(), cfg, nil, metrics.NewInstruments(nil), quiet()); err == nil {
 		t.Error("a missing folder must stop the start-up with a clear error")
 	}
 }

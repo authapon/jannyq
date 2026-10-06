@@ -59,7 +59,15 @@ func (a *Agent) MaybeCompact(ctx context.Context, s *session.Session) (bool, err
 
 // Compact summarises everything except roughly the last keep messages
 // (always cutting at a user message). It reports whether anything changed.
-func (a *Agent) Compact(ctx context.Context, s *session.Session, keep int) (bool, error) {
+func (a *Agent) Compact(ctx context.Context, s *session.Session, keep int) (done bool, err error) {
+	defer func() {
+		switch {
+		case err != nil:
+			a.cfg.Metrics.Compactions.Inc("error")
+		case done:
+			a.cfg.Metrics.Compactions.Inc("ok")
+		}
+	}()
 	stored, err := s.Messages(ctx)
 	if err != nil {
 		return false, err

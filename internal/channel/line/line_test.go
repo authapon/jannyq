@@ -131,10 +131,10 @@ func newRig(t *testing.T, handle func(channel.Incoming)) *rig {
 	r.cancel = cancel
 	go func() {
 		r.done <- ch.Run(ctx, func(ctx context.Context, in channel.Incoming) {
-			in.Accepted()
 			if handle != nil {
 				handle(in)
 			}
+			in.Accepted() // after the hook: the next message of the chat may run as soon as this is called
 			r.in <- in
 		})
 	}()

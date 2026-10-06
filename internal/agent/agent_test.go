@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/authapon/jannyq/internal/llm"
+	"github.com/authapon/jannyq/internal/metrics"
 	"github.com/authapon/jannyq/internal/session"
 	"github.com/authapon/jannyq/internal/skill"
 	"github.com/authapon/jannyq/internal/tool"
@@ -447,5 +448,45 @@ func TestPromptIncludesToolHintsAndSkills(t *testing.T) {
 	}
 	if got := newAgent(&fakeProvider{}, Config{Skills: fakeSkills{}}, &loadSkillStub{}).systemPrompt(Input{}, true); strings.Contains(got, "Skills:") {
 		t.Error("empty skills section printed")
+	}
+}
+
+func TestAgentMetrics(t *testing.T) {
+	reg := metrics.New()
+	inst := metrics.NewInstruments(reg)
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		callTool("1", "echo", `{}`),
+		callTool("2", "made_up_tool_name", `{}`),
+		func(llm.Request) (*llm.Response, error) {
+			return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, Usage: llm.Usage{PromptTokens: 100, CompletionTokens: 7}}, nil
+		},
+	}}
+	a := newAgent(p, Config{Metrics: inst}, &echoTool{})
+	withSession(t, func(s *session.Session) {
+		if _, err := a.Reply(ctx, s, Input{Text: "go"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	out := reg.Render()
+	for _, want := range []string{
+		`jannyq_tool_calls_total{tool="echo",result="ok"} 1`,
+		`jannyq_tool_calls_total{tool="unknown",result="error"} 1`,
+		`jannyq_llm_requests_total{result="ok"} 3`,
+		`jannyq_llm_tokens_total{type="prompt"} 100`,
+		`jannyq_llm_tokens_total{type="completion"} 7`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metrics lack %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "made_up_tool_name") {
+		t.Error("a tool name invented by the model became a label")
+	}
+	// a failing model is counted too
+	reg2 := metrics.New()
+	b := newAgent(&fakeProvider{}, Config{Metrics: metrics.NewInstruments(reg2)})
+	withSession(t, func(s *session.Session) { _, _ = b.Reply(ctx, s, Input{Text: "x"}) })
+	if !strings.Contains(reg2.Render(), `jannyq_llm_requests_total{result="error"} 1`) {
+		t.Errorf("%s", reg2.Render())
 	}
 }

@@ -105,6 +105,9 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--skills-sandbox-path` | `/skills` | where that directory is mounted inside the sandbox |
 | `--knowledge-dir` | – | folder for the shared knowledge base; enables `knowledge_search` ([details](#knowledge-base)) |
 | `--embed-model` | – | embedding model for semantic search (`bge-m3`, `nomic-embed-text`, …); empty = words only |
+| `--metrics-listen` / `--metrics-token` | – | Prometheus metrics on their own address ([guide](docs/DEPLOYMENT.md#4-monitoring)) |
+| `--backup-dir` / `--backup-interval` / `--backup-keep` | – / `24h` / `7` | automatic backups ([guide](docs/DEPLOYMENT.md#5-backups)) |
+| `--retention-days` | `0` | delete chats idle for this many days (`0` = keep) |
 | `--attachments` | `true` | let users send pictures, PDFs and text files ([details](#pictures-pdfs-and-text-files)) |
 | `--vision` | `auto` | can the model see pictures: `auto` (asks Ollama; `on` for `openai`), `on`, `off` |
 | `--pdf-engine` | `auto` | read PDFs in the `sandbox` (when `--sandbox-url` is set), or `native` (in-process, no OCR) |
@@ -307,6 +310,17 @@ put it behind the access code (12+ characters; guesses are throttled but not imp
 the rate limits low. Memory use is bounded (replies kept for reconnecting browsers are capped per chat, idle
 chats are forgotten after 30 minutes), and a chat's database file is only created when its first message is sent.
 
+## Operating it
+
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (Thai summary: [DEPLOYMENT.th.md](docs/DEPLOYMENT.th.md)) is the guide for running jannyq for other people: a pre-exposure checklist,
+monitoring, backups and restore drills, upgrades, data retention and a systemd variant. The tools it describes:
+
+- **Metrics** (`--metrics-listen`, `--metrics-token`): Prometheus text format on its own port, with request, model, tool, file, knowledge-base and backup figures.
+- **Health**: `/healthz` and `/readyz` on the web server (the data directory is writable, the knowledge database answers).
+- **Backups**: `--backup-dir` (daily, newest `--backup-keep` kept, `--backup-files`), and `jannyq backup`, `jannyq verify FILE`, `jannyq restore --from FILE [--force]`.
+  Snapshots are consistent while the bot runs; a restore is checked completely before it touches anything.
+- **Retention**: `--retention-days N` deletes chats (messages and files) idle for N days.
+
 ## Public deployment (HTTPS)
 
 `docker-compose.public.yml` adds [Caddy](https://caddyserver.com/), which gets and renews a Let's Encrypt
@@ -427,7 +441,9 @@ make docker
    of edits, deletions and renames, `knowledge_search` tool.
 6. ✅ **Discord and LINE** — gateway and webhook channels with attachments, mentions and group context.
 7. ✅ **Messenger and WhatsApp** — Meta webhooks with signature checks, attachments and the same router as every other channel.
-8. Hardening and operations: per-session sandbox containers (Docker backend), metrics, backups, deployment guide.
+8. ✅ **Hardening and operations** — Prometheus metrics, `/readyz`, consistent backups with verified restore, retention, `govulncheck` in CI,
+   deployment guide and systemd units. (A container-per-chat Docker backend was left out on purpose: it needs the Docker socket inside the bot;
+   see the guide for gVisor or a separate machine instead.)
 
 ## Security notes
 
