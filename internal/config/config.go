@@ -128,7 +128,18 @@ type Config struct {
 	LinePath      string
 	LineAPI       string
 	LineDataAPI   string
-	CLI           bool
+
+	MessengerToken       string
+	MessengerAppSecret   string
+	MessengerVerifyToken string
+	MessengerPath        string
+	WhatsAppToken        string
+	WhatsAppPhoneID      string
+	WhatsAppAppSecret    string
+	WhatsAppVerifyToken  string
+	WhatsAppPath         string
+	GraphAPI             string
+	CLI                  bool
 
 	// Access control and limits
 	AllowedUsers    []string
@@ -359,6 +370,16 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.str(&c.LinePath, "line-webhook-path", "/webhook/line", "path of the LINE webhook on the HTTP server")
 	l.str(&c.LineAPI, "line-api", "https://api.line.me", "LINE Messaging API base URL")
 	l.str(&c.LineDataAPI, "line-data-api", "https://api-data.line.me", "LINE content API base URL")
+	l.secret(&c.MessengerToken, "messenger-page-token", "Facebook Page access token; with the app secret and verify token enables the Messenger channel (needs --listen and a public HTTPS URL)")
+	l.secret(&c.MessengerAppSecret, "messenger-app-secret", "secret of the Meta app, to check Messenger webhook signatures")
+	l.secret(&c.MessengerVerifyToken, "messenger-verify-token", "string you choose and enter in the Meta console when subscribing the Messenger webhook")
+	l.str(&c.MessengerPath, "messenger-webhook-path", "/webhook/messenger", "path of the Messenger webhook on the HTTP server")
+	l.secret(&c.WhatsAppToken, "whatsapp-token", "WhatsApp Cloud API access token; with the phone number id, app secret and verify token enables the WhatsApp channel (needs --listen and a public HTTPS URL)")
+	l.str(&c.WhatsAppPhoneID, "whatsapp-phone-number-id", "", "id of the WhatsApp business phone number (shown in the Meta console; not the phone number itself)")
+	l.secret(&c.WhatsAppAppSecret, "whatsapp-app-secret", "secret of the Meta app, to check WhatsApp webhook signatures")
+	l.secret(&c.WhatsAppVerifyToken, "whatsapp-verify-token", "string you choose and enter in the Meta console when subscribing the WhatsApp webhook")
+	l.str(&c.WhatsAppPath, "whatsapp-webhook-path", "/webhook/whatsapp", "path of the WhatsApp webhook on the HTTP server")
+	l.str(&c.GraphAPI, "graph-api", "https://graph.facebook.com/v21.0", "Meta Graph API base URL (Messenger and WhatsApp)")
 	l.boolean(&c.CLI, "cli", false, "enable the terminal channel (chat via stdin/stdout)")
 
 	// Access control and limits
@@ -505,6 +526,7 @@ func (c *Config) validate() error {
 	if c.RateLimit < 0 {
 		bad("--rate-limit must not be negative")
 	}
+	c.validateMeta(bad)
 	if (c.LineSecret == "") != (c.LineToken == "") {
 		bad("the LINE channel needs both --line-channel-secret and --line-channel-token")
 	}
@@ -650,4 +672,42 @@ func (c *Config) OCRLanguages() string {
 	default:
 		return l
 	}
+}
+
+// validateMeta checks the Messenger and WhatsApp settings.
+func (c *Config) validateMeta(bad func(format string, a ...any)) {
+	messenger := c.MessengerToken != "" || c.MessengerAppSecret != "" || c.MessengerVerifyToken != ""
+	whatsapp := c.WhatsAppToken != "" || c.WhatsAppPhoneID != "" || c.WhatsAppAppSecret != "" || c.WhatsAppVerifyToken != ""
+	if messenger && (c.MessengerToken == "" || c.MessengerAppSecret == "" || c.MessengerVerifyToken == "") {
+		bad("the Messenger channel needs --messenger-page-token, --messenger-app-secret and --messenger-verify-token")
+	}
+	if whatsapp && (c.WhatsAppToken == "" || c.WhatsAppPhoneID == "" || c.WhatsAppAppSecret == "" || c.WhatsAppVerifyToken == "") {
+		bad("the WhatsApp channel needs --whatsapp-token, --whatsapp-phone-number-id, --whatsapp-app-secret and --whatsapp-verify-token")
+	}
+	if !messenger && !whatsapp {
+		return
+	}
+	if c.Listen == "" {
+		bad("the Messenger and WhatsApp channels need --listen (Meta calls a webhook on this server; put it behind HTTPS)")
+	}
+	paths := map[string]string{}
+	check := func(name, p string, on bool) {
+		if !on {
+			return
+		}
+		if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, " ?#") || strings.Contains(p, "..") {
+			bad("%s must be a plain URL path such as /webhook/messenger", name)
+			return
+		}
+		if other, dup := paths[p]; dup {
+			bad("%s and %s use the same path %s", name, other, p)
+		}
+		paths[p] = name
+		if c.Web && strings.TrimSuffix(c.WebBasePath, "/") != "" && strings.HasPrefix(p, c.WebBasePath) {
+			bad("%s must not lie under --web-base-path", name)
+		}
+	}
+	check("--messenger-webhook-path", c.MessengerPath, messenger)
+	check("--whatsapp-webhook-path", c.WhatsAppPath, whatsapp)
+	check("--line-webhook-path", c.LinePath, c.LineSecret != "")
 }

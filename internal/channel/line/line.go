@@ -68,7 +68,7 @@ type Channel struct {
 	host    Host
 
 	inFlight atomic.Int64
-	bad      *failureCounter
+	bad      *webhook.Failures
 
 	mu   sync.Mutex
 	sink channel.Sink
@@ -116,7 +116,7 @@ func New(cfg Config, host Host, log *slog.Logger) (*Channel, error) {
 	c := &Channel{
 		cfg: cfg, client: client, log: log.With("channel", "line"), host: host,
 		orderer: channel.NewOrderer(), dedupe: webhook.NewDedupe(15*time.Minute, 20000),
-		bad: newFailureCounter(badSignaturesPerMinute, time.Minute), profiles: map[string]profile{}, now: time.Now,
+		bad: webhook.NewFailures(badSignaturesPerMinute, time.Minute), profiles: map[string]profile{}, now: time.Now,
 	}
 	host.Mux().Handle("POST "+cfg.WebhookPath, http.HandlerFunc(c.handleWebhook))
 	host.ExemptFromRateLimit(cfg.WebhookPath)
@@ -174,14 +174,14 @@ type event struct {
 
 func (c *Channel) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	key := c.host.ClientKey(r)
-	if c.bad.blocked(key) {
+	if c.bad.Blocked(key) {
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 	webhook.Signed(webhook.DefaultMaxBody, func(r *http.Request, body []byte) bool {
 		ok := webhook.VerifyBase64([]byte(c.cfg.ChannelSecret), body, r.Header.Get("X-Line-Signature"))
 		if !ok {
-			c.bad.add(key)
+			c.bad.Add(key)
 		}
 		return ok
 	}, c.accept).ServeHTTP(w, r)
@@ -316,48 +316,6 @@ func (c *Channel) convert(ev event, received time.Time) (in channel.Incoming, na
 	sourceType, senderID := ev.Source.Type, ev.Source.UserID
 	// The name needs a call to LINE: it is looked up after the webhook has been answered.
 	return in, func(ctx context.Context) string { return c.displayName(ctx, sourceType, chatID, senderID) }, true
-}
-
-// failureCounter counts refusals per address in a sliding minute.
-type failureCounter struct {
-	max    int
-	window time.Duration
-	mu     sync.Mutex
-	hits   map[string][]time.Time
-}
-
-func newFailureCounter(max int, window time.Duration) *failureCounter {
-	return &failureCounter{max: max, window: window, hits: map[string][]time.Time{}}
-}
-
-func (f *failureCounter) prune(key string, now time.Time) []time.Time {
-	var keep []time.Time
-	for _, t := range f.hits[key] {
-		if now.Sub(t) < f.window {
-			keep = append(keep, t)
-		}
-	}
-	if len(keep) == 0 {
-		delete(f.hits, key)
-	} else {
-		f.hits[key] = keep
-	}
-	return keep
-}
-
-func (f *failureCounter) blocked(key string) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.prune(key, time.Now())) >= f.max
-}
-
-func (f *failureCounter) add(key string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.hits) > 10000 {
-		f.hits = map[string][]time.Time{} // an attack from very many addresses: start over rather than grow
-	}
-	f.hits[key] = append(f.prune(key, time.Now()), time.Now())
 }
 
 // --- LINE API ---

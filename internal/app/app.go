@@ -19,8 +19,10 @@ import (
 	"github.com/authapon/jannyq/internal/channel/cli"
 	"github.com/authapon/jannyq/internal/channel/discord"
 	"github.com/authapon/jannyq/internal/channel/line"
+	"github.com/authapon/jannyq/internal/channel/messenger"
 	"github.com/authapon/jannyq/internal/channel/telegram"
 	"github.com/authapon/jannyq/internal/channel/web"
+	"github.com/authapon/jannyq/internal/channel/whatsapp"
 	"github.com/authapon/jannyq/internal/config"
 	"github.com/authapon/jannyq/internal/i18n"
 	"github.com/authapon/jannyq/internal/llm"
@@ -266,11 +268,33 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		channels = append(channels, lc)
 		log.Info("LINE webhook ready: set the webhook URL of the channel to https://<your host>" + cfg.LinePath)
 	}
+	if cfg.MessengerToken != "" {
+		mc, err := messenger.New(messenger.Config{
+			PageToken: cfg.MessengerToken, AppSecret: cfg.MessengerAppSecret, VerifyToken: cfg.MessengerVerifyToken,
+			WebhookPath: cfg.MessengerPath, GraphAPI: cfg.GraphAPI,
+		}, srv, log)
+		if err != nil {
+			return err
+		}
+		channels = append(channels, mc)
+		log.Info("Messenger webhook ready: subscribe it in the Meta console at https://<your host>" + cfg.MessengerPath)
+	}
+	if cfg.WhatsAppToken != "" {
+		wc, err := whatsapp.New(whatsapp.Config{
+			AccessToken: cfg.WhatsAppToken, PhoneNumberID: cfg.WhatsAppPhoneID, AppSecret: cfg.WhatsAppAppSecret,
+			VerifyToken: cfg.WhatsAppVerifyToken, WebhookPath: cfg.WhatsAppPath, GraphAPI: cfg.GraphAPI,
+		}, srv, log)
+		if err != nil {
+			return err
+		}
+		channels = append(channels, wc)
+		log.Info("WhatsApp webhook ready: subscribe it in the Meta console at https://<your host>" + cfg.WhatsAppPath)
+	}
 	if cfg.CLI {
 		channels = append(channels, cli.New())
 	}
 	if len(channels) == 0 {
-		return errors.New("no channel enabled: set JANNYQ_TELEGRAM_TOKEN, JANNYQ_DISCORD_TOKEN or the LINE channel settings, use --web or use --cli")
+		return errors.New("no channel enabled: set JANNYQ_TELEGRAM_TOKEN, JANNYQ_DISCORD_TOKEN or the LINE, Messenger or WhatsApp settings, use --web or use --cli")
 	}
 
 	log.Info("jannyq starting",

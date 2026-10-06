@@ -163,3 +163,52 @@ func (d *Dedupe) Seen(key string) bool {
 	d.seen[key] = now
 	return false
 }
+
+// Failures counts refused requests per client address in a sliding window, so
+// that an address that keeps sending bad signatures can be turned away without
+// the cost of checking each one. Webhook endpoints are exempt from the general
+// per-address limit (platforms call from a few shared addresses), so they use
+// this for what they refuse.
+type Failures struct {
+	max    int
+	window time.Duration
+	mu     sync.Mutex
+	hits   map[string][]time.Time
+}
+
+// NewFailures turns an address away once it has max failures within window.
+func NewFailures(max int, window time.Duration) *Failures {
+	return &Failures{max: max, window: window, hits: map[string][]time.Time{}}
+}
+
+func (f *Failures) prune(key string, now time.Time) []time.Time {
+	var keep []time.Time
+	for _, t := range f.hits[key] {
+		if now.Sub(t) < f.window {
+			keep = append(keep, t)
+		}
+	}
+	if len(keep) == 0 {
+		delete(f.hits, key)
+	} else {
+		f.hits[key] = keep
+	}
+	return keep
+}
+
+// Blocked reports whether key has used up its failures.
+func (f *Failures) Blocked(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.prune(key, time.Now())) >= f.max
+}
+
+// Add records one failure of key.
+func (f *Failures) Add(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.hits) > 10000 {
+		f.hits = map[string][]time.Time{} // an attack from very many addresses: start over rather than grow
+	}
+	f.hits[key] = append(f.prune(key, time.Now()), time.Now())
+}

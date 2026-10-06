@@ -163,3 +163,23 @@ func TestDedupe(t *testing.T) {
 		t.Errorf("tracking %d keys, max is 3", len(d.seen))
 	}
 }
+
+func TestFailuresBlockAnAddressAfterTooManyAndForgetOverTime(t *testing.T) {
+	f := NewFailures(3, 50*time.Millisecond)
+	for i := 0; i < 3; i++ {
+		if f.Blocked("a") {
+			t.Fatalf("blocked after %d failures", i)
+		}
+		f.Add("a")
+	}
+	if !f.Blocked("a") {
+		t.Error("not blocked after 3 failures")
+	}
+	if f.Blocked("b") {
+		t.Error("another address was blocked")
+	}
+	time.Sleep(80 * time.Millisecond)
+	if f.Blocked("a") {
+		t.Error("still blocked after the window")
+	}
+}

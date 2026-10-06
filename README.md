@@ -35,8 +35,8 @@ A chat bot written in Go that connects messaging platforms to **Ollama** or any
   can mirror the user's language (`--lang-mode follow-user`).
 - **Safety basics**: user allowlist, per-user rate limit, per-chat request queue, global concurrency limit,
   bounded tool-call rounds, tool output limits, Telegram token redaction in logs.
-- **Channels**: Telegram and Discord (they call out: no public URL needed), LINE (webhook, needs public HTTPS),
-  a **web chat** page, and a terminal channel for local testing.
+- **Channels**: Telegram and Discord (they call out: no public URL needed), LINE, Messenger and WhatsApp (webhooks, need
+  public HTTPS), a **web chat** page, and a terminal channel for local testing.
 - **Web chat**: one self-contained page (no external scripts or fonts) served by the bot itself; replies arrive
   over server-sent events, history survives reloads, UI texts follow `--lang`, works on phones, dark mode.
 
@@ -113,6 +113,8 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--telegram-token` | – | enables the Telegram channel (prefer the env var) |
 | `--discord-token` | – | enables the Discord channel (prefer `JANNYQ_DISCORD_TOKEN[_FILE]`; [notes](#discord-notes)) |
 | `--line-channel-secret` / `--line-channel-token` | – | enable the LINE channel; needs `--listen` and a public HTTPS URL ([notes](#line-notes)) |
+| `--messenger-page-token` / `-app-secret` / `-verify-token` | – | enable the Messenger channel ([notes](#messenger-and-whatsapp-notes)) |
+| `--whatsapp-token` / `-phone-number-id` / `-app-secret` / `-verify-token` | – | enable the WhatsApp channel |
 | `--cli` | `false` | enable the terminal channel |
 | `--allowed-users` | everyone | comma-separated user IDs or `channel:id` |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
@@ -161,6 +163,29 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 - **Replies use the free reply token** of the message for the first answer; anything after that (or an answer that takes more than about
   50 seconds) is **pushed**, which counts against the monthly message quota of your LINE account. Long answers are split into several messages.
 - Pictures and files are read like on Telegram (videos, audio, stickers and locations are not). While the model works, LINE's loading animation is shown in one-to-one chats.
+
+### Messenger and WhatsApp notes
+
+Both use Meta's Graph API and call a webhook of the bot, so they need a **public HTTPS URL** (`docker-compose.public.yml`) and
+`--listen`. Create an app at <https://developers.facebook.com/apps>, then:
+
+- **Messenger** (a Facebook Page): add the *Messenger* product, generate a **Page access token** (`JANNYQ_MESSENGER_PAGE_TOKEN`), copy the
+  **app secret** (*App settings → Basic*, `JANNYQ_MESSENGER_APP_SECRET`), invent a **verify token** (`JANNYQ_MESSENGER_VERIFY_TOKEN`), and
+  set the webhook to `https://<host>/webhook/messenger` with the `messages` field subscribed for the Page.
+- **WhatsApp** (Cloud API): add the *WhatsApp* product, create a permanent **access token** of a system user (`JANNYQ_WHATSAPP_TOKEN`), copy the
+  **phone number ID** of the business number (`JANNYQ_WHATSAPP_PHONE_NUMBER_ID`; it is not the phone number), the **app secret**
+  and an invented **verify token**, and set the webhook to `https://<host>/webhook/whatsapp` with the `messages` field subscribed.
+- Meta checks the URL with a handshake (answered with the verify token) and then signs every request with the app secret
+  (`X-Hub-Signature-256`, HMAC-SHA256); unsigned or wrongly signed requests are refused before their body is read, redeliveries are ignored,
+  and the webhook answers at once while the model works afterwards.
+- These are **one-to-one chats**: every message is answered (Messenger's Page inbox and WhatsApp's Cloud API have no groups). Names come from
+  the Graph API when the app may read them (Messenger needs permission; WhatsApp sends the profile name), otherwise people are called `user`.
+- **Pictures, PDFs and text files** are read like on Telegram. The access token is sent only to Meta, never to the file links of Messenger
+  attachments. Videos, audio, stickers, locations and contacts are not read.
+- Meta's **24-hour rule**: you can answer within 24 hours of the user's last message; a reply that comes later is refused by Meta (logged). WhatsApp
+  also requires an app in *live* mode and, for numbers other than the test number, a verified business.
+- Long answers are split (2,000 characters on Messenger, 4,096 on WhatsApp). While the model works, Messenger shows its typing bubble and
+  WhatsApp marks the message as read with a typing indicator.
 
 ### Choosing a model
 
@@ -301,7 +326,7 @@ do, and will use this same server.
 `internal/webhook` provides what every webhook channel needs, already tested: bounded body reading,
 `VerifyHex` (Meta's `X-Hub-Signature-256`) and `VerifyBase64` (LINE's `X-Line-Signature`) in constant time,
 `Signed(...)` to run a handler only after the signature checks out, `MetaChallenge` for the subscription
-handshake, and `Dedupe` to ignore redelivered events. Channels receive the shared `server.Server`
+handshake, `Dedupe` to ignore redelivered events and `Failures` to turn away addresses that keep failing. Channels receive the shared `server.Server`
 (rate limiting, client address detection, security headers) and register their routes on its mux.
 
 ## `run_command` and the sandbox
@@ -375,7 +400,7 @@ internal/sandbox    command executor (limits, per-chat users), HTTP server and c
 internal/skill      skills loader
 internal/audit      command audit log
 internal/ratelimit  sliding-window rate limiter
-internal/channel    Channel interface; telegram, discord (gateway), line (webhook), web (page, SSE hub, sessions), cli
+internal/channel    Channel interface; telegram, discord (gateway), line, messenger, whatsapp (webhooks; meta = shared Graph client and receiver), web (page, SSE hub, sessions), cli
 internal/server     shared HTTP server: rate limits, client IP, security headers
 internal/webhook    signature checks, Meta handshake, event de-duplication
 internal/router     access control, rate limits, commands
@@ -401,7 +426,7 @@ make docker
 5. ✅ **Knowledge base (RAG)** from a folder of text/PDF files: SQLite, hybrid vector + full-text search, live sync
    of edits, deletions and renames, `knowledge_search` tool.
 6. ✅ **Discord and LINE** — gateway and webhook channels with attachments, mentions and group context.
-7. Messenger and WhatsApp.
+7. ✅ **Messenger and WhatsApp** — Meta webhooks with signature checks, attachments and the same router as every other channel.
 8. Hardening and operations: per-session sandbox containers (Docker backend), metrics, backups, deployment guide.
 
 ## Security notes

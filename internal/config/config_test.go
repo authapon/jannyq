@@ -409,3 +409,50 @@ func TestDiscordAndLineSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestMessengerAndWhatsAppSettings(t *testing.T) {
+	env := func(kv ...string) map[string]string {
+		m := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+		for i := 0; i < len(kv); i += 2 {
+			m["JANNYQ_"+kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	messenger := env("MESSENGER_PAGE_TOKEN", "t", "MESSENGER_APP_SECRET", "s", "MESSENGER_VERIFY_TOKEN", "v")
+	whatsapp := env("WHATSAPP_TOKEN", "t", "WHATSAPP_PHONE_NUMBER_ID", "1055", "WHATSAPP_APP_SECRET", "s", "WHATSAPP_VERIFY_TOKEN", "v")
+	both := env("MESSENGER_PAGE_TOKEN", "t", "MESSENGER_APP_SECRET", "s", "MESSENGER_VERIFY_TOKEN", "v",
+		"WHATSAPP_TOKEN", "t", "WHATSAPP_PHONE_NUMBER_ID", "1055", "WHATSAPP_APP_SECRET", "s", "WHATSAPP_VERIFY_TOKEN", "v",
+		"LINE_CHANNEL_SECRET", "s", "LINE_CHANNEL_TOKEN", "t")
+	listen := []string{"--listen=:8080"}
+	c, err := load(t, listen, messenger)
+	if err != nil || c.MessengerPath != "/webhook/messenger" || c.GraphAPI != "https://graph.facebook.com/v21.0" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	if c, err = load(t, listen, whatsapp); err != nil || c.WhatsAppPath != "/webhook/whatsapp" || c.WhatsAppPhoneID != "1055" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	if _, err = load(t, listen, both); err != nil {
+		t.Fatalf("all three webhook channels together: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		args []string
+		env  map[string]string
+	}{
+		"messenger without listen":    {nil, messenger},
+		"whatsapp without listen":     {nil, whatsapp},
+		"messenger without secret":    {listen, env("MESSENGER_PAGE_TOKEN", "t", "MESSENGER_VERIFY_TOKEN", "v")},
+		"messenger without verify":    {listen, env("MESSENGER_PAGE_TOKEN", "t", "MESSENGER_APP_SECRET", "s")},
+		"messenger only a secret":     {listen, env("MESSENGER_APP_SECRET", "s")},
+		"whatsapp without phone id":   {listen, env("WHATSAPP_TOKEN", "t", "WHATSAPP_APP_SECRET", "s", "WHATSAPP_VERIFY_TOKEN", "v")},
+		"whatsapp without app secret": {listen, env("WHATSAPP_TOKEN", "t", "WHATSAPP_PHONE_NUMBER_ID", "1", "WHATSAPP_VERIFY_TOKEN", "v")},
+		"same path twice":             {append([]string{"--messenger-webhook-path=/hook", "--whatsapp-webhook-path=/hook"}, listen...), both},
+		"path equal to the LINE one":  {append([]string{"--whatsapp-webhook-path=/webhook/line"}, listen...), both},
+		"path with ..":                {append([]string{"--messenger-webhook-path=/a/../b"}, listen...), messenger},
+		"path under the web chat":     {append([]string{"--web", "--web-base-path=/chat/", "--whatsapp-webhook-path=/chat/wa"}, listen...), whatsapp},
+		"relative path":               {append([]string{"--messenger-webhook-path=hook"}, listen...), messenger},
+	} {
+		if _, err := load(t, tc.args, tc.env); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

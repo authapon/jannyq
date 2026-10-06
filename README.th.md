@@ -95,6 +95,26 @@ compose จะเริ่ม jannyq, **sandbox**, SearXNG (เปิดรู�
   คำตอบยาวถูกแบ่งเป็นหลายข้อความ
 - รูปและไฟล์อ่านได้เหมือน Telegram (วิดีโอ เสียง สติกเกอร์ และตำแหน่งไม่รองรับ) ระหว่างที่โมเดลทำงานจะแสดง loading animation ของ LINE ในแชทส่วนตัว
 
+### Messenger และ WhatsApp
+
+ทั้งสองใช้ Graph API ของ Meta และ Meta เป็นฝ่ายเรียก webhook ของบอท จึงต้องมี **URL สาธารณะแบบ HTTPS** (`docker-compose.public.yml`) และ `--listen`
+สร้างแอปที่ <https://developers.facebook.com/apps> แล้ว:
+
+- **Messenger** (Facebook Page): เพิ่มผลิตภัณฑ์ *Messenger* สร้าง **Page access token** (`JANNYQ_MESSENGER_PAGE_TOKEN`) คัดลอก **app secret**
+  (*App settings → Basic*, `JANNYQ_MESSENGER_APP_SECRET`) คิด **verify token** เอง (`JANNYQ_MESSENGER_VERIFY_TOKEN`) แล้วตั้ง webhook เป็น
+  `https://<host>/webhook/messenger` และ subscribe field `messages` ของเพจ
+- **WhatsApp** (Cloud API): เพิ่มผลิตภัณฑ์ *WhatsApp* สร้าง **access token** ถาวรของ system user (`JANNYQ_WHATSAPP_TOKEN`) คัดลอก
+  **phone number ID** ของเบอร์ธุรกิจ (`JANNYQ_WHATSAPP_PHONE_NUMBER_ID` ไม่ใช่เบอร์โทรศัพท์) **app secret** และ verify token ที่คิดเอง
+  แล้วตั้ง webhook เป็น `https://<host>/webhook/whatsapp` และ subscribe field `messages`
+- Meta ตรวจ URL ด้วย handshake (บอทตอบด้วย verify token) แล้วเซ็นทุก request ด้วย app secret (`X-Hub-Signature-256`, HMAC-SHA256)
+  request ที่ไม่มี/เซ็นผิดถูกปฏิเสธก่อนอ่านเนื้อหา event ที่ส่งซ้ำถูกข้าม และ webhook ตอบทันทีแล้วให้โมเดลทำงานทีหลัง
+- ทั้งสองเป็น **แชทตัวต่อตัว** ตอบทุกข้อความ (กล่องข้อความของ Page และ WhatsApp Cloud API ไม่มีกลุ่ม) ชื่อผู้ใช้มาจาก Graph API เมื่อแอปมีสิทธิ์
+  (Messenger ต้องขออนุญาต; WhatsApp ส่งชื่อโปรไฟล์มาให้) ไม่เช่นนั้นเรียกว่า `user`
+- รูป PDF และไฟล์ข้อความอ่านได้เหมือน Telegram token จะถูกส่งให้ Meta เท่านั้น ไม่ส่งไปยังลิงก์ไฟล์ของ Messenger วิดีโอ เสียง สติกเกอร์ ตำแหน่ง และ contacts ไม่รองรับ
+- **กฎ 24 ชั่วโมงของ Meta**: ตอบได้ภายใน 24 ชั่วโมงหลังข้อความล่าสุดของผู้ใช้ คำตอบที่ช้ากว่านั้น Meta จะปฏิเสธ (บันทึกใน log)
+  WhatsApp ยังต้องให้แอปอยู่ในโหมด *live* และสำหรับเบอร์อื่นนอกจากเบอร์ทดสอบต้องยืนยันตัวตนธุรกิจ
+- คำตอบยาวถูกแบ่ง (Messenger 2,000 ตัวอักษร WhatsApp 4,096) ระหว่างที่โมเดลทำงาน Messenger แสดงสัญลักษณ์กำลังพิมพ์ ส่วน WhatsApp ทำเครื่องหมายว่าอ่านแล้วพร้อม typing indicator
+
 ### การเลือกโมเดล
 
 โมเดลต้องรองรับ **tool calling** ถึงจะใช้ `web_search`/`web_fetch` ได้ (Ollama: qwen3, llama3.1 ขึ้นไป ฯลฯ)
@@ -209,7 +229,7 @@ docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
 ```
 
 เปิดออกภายนอกเฉพาะ Caddy ส่วน jannyq อยู่ใน network `edge` ส่วนตัวและเชื่อ header ที่ Caddy ส่งมาเท่านั้น
-Telegram/Discord ไม่ต้องมี URL สาธารณะ ส่วน LINE (ใช้ได้แล้ว), Messenger และ WhatsApp (phase ถัดไป) ต้องมี และจะใช้เซิร์ฟเวอร์เดียวกันนี้
+Telegram/Discord ไม่ต้องมี URL สาธารณะ ส่วน LINE, Messenger และ WhatsApp ต้องมี และจะใช้เซิร์ฟเวอร์เดียวกันนี้
 
 ## `run_command` และ sandbox
 
@@ -253,5 +273,5 @@ skill จึงมีสคริปต์ให้รันได้ และ�
    Telegram รูป/เอกสาร/อัลบั้ม และอัปโหลดผ่าน web chat
 5. ✅ **ฐานความรู้ RAG** จากโฟลเดอร์ไฟล์ text/PDF — SQLite, ค้นแบบ vector + full-text, sync เมื่อไฟล์แก้ไข/ลบ/เปลี่ยนชื่อ
 6. ✅ **Discord และ LINE** — ช่องทางแบบ gateway และ webhook รองรับไฟล์แนบ mention และบริบทกลุ่ม
-7. Messenger และ WhatsApp
+7. ✅ **Messenger และ WhatsApp** — webhook ของ Meta ตรวจ signature รองรับไฟล์แนบ และใช้ router เดียวกับทุกช่องทาง
 8. Hardening และ operations
