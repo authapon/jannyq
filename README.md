@@ -22,6 +22,8 @@ A chat bot written in Go that connects messaging platforms to **Ollama** or any
     passages in them (see [Pictures, PDFs and text files](#pictures-pdfs-and-text-files)).
 - **Pictures, PDFs and text files**: users can send them on Telegram and in the web chat. The main model looks
   at pictures itself (so it must be a vision model); PDFs are read in the sandbox, with OCR for scans.
+- **Knowledge base (RAG)**: a folder of text and PDF files shared by every chat, searched with `knowledge_search`;
+  the index follows edits, deletions and renames (see [Knowledge base](#knowledge-base)).
 - **Time and names in every conversation**: each user message reaches the model with a header giving when it
   was sent and, in groups, who sent it (see [below](#conversation-context-time-and-names)).
 - **Memory per chat**: every user (private chat) and every group has its own SQLite database
@@ -101,6 +103,8 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--audit-log` | `<data-dir>/audit/commands.jsonl` | one JSON line per command, rotated at 10 MB |
 | `--skills-dir` | – | directory of skills; enables `load_skill` |
 | `--skills-sandbox-path` | `/skills` | where that directory is mounted inside the sandbox |
+| `--knowledge-dir` | – | folder for the shared knowledge base; enables `knowledge_search` ([details](#knowledge-base)) |
+| `--embed-model` | – | embedding model for semantic search (`bge-m3`, `nomic-embed-text`, …); empty = words only |
 | `--attachments` | `true` | let users send pictures, PDFs and text files ([details](#pictures-pdfs-and-text-files)) |
 | `--vision` | `auto` | can the model see pictures: `auto` (asks Ollama; `on` for `openai`), `on`, `off` |
 | `--pdf-engine` | `auto` | read PDFs in the `sandbox` (when `--sandbox-url` is set), or `native` (in-process, no OCR) |
@@ -166,6 +170,32 @@ Things to know:
 - **Telegram**: photos and documents (bot API limit 20 MB); albums arrive as one message. **Web chat**: 📎 button, drag and drop or paste;
   `--web-max-upload-mb` (10) and `--web-max-files` (4). Other platforms follow with their channels.
 - Turn it all off with `--attachments=false`.
+
+## Knowledge base
+
+Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask about its documents. The model calls
+`knowledge_search` (passages with file names and pages) and `knowledge_files` (what is there), then answers and names its sources.
+
+- **Files**: PDF (including scans, by OCR in the sandbox), `txt md rst csv tsv json jsonl xml yaml toml ini log srt vtt tex`.
+  Sub-folders are read; hidden files and folders, symbolic links, and other file types are ignored.
+- **Search is hybrid**: a full-text index (SQLite FTS5 with trigrams, so Thai, Chinese and other languages written without spaces work)
+  and, when `--embed-model` is set, embeddings (Ollama `/api/embed` or an OpenAI-compatible `/embeddings`); the two rankings are merged
+  (reciprocal rank fusion) and vector matches below `--knowledge-min-similarity` are dropped. Without an embedding model — or while
+  it is unreachable — search works by words only, and the answer says so. Good choices for Ollama: `bge-m3` (multilingual, Thai included)
+  or the smaller `nomic-embed-text`. Changing `--embed-model` re-embeds the stored passages without re-reading the files.
+- **The index follows the folder**: every `--knowledge-interval` (30 s) the folder is scanned. New files are read, edited files are read again,
+  deleted files are forgotten, a renamed file keeps its passages (found by content hash, no new embedding), a file touched without
+  a change costs nothing, and a file that changed a moment ago waits until it has settled (so a copy in progress is not indexed half-way).
+  A file that cannot be read (damaged, password protected, too large) is listed with the reason and retried when it changes.
+  If the folder is missing at a scan, the index is kept rather than emptied.
+- **Where**: passages live in `<data-dir>/knowledge.db` (`--knowledge-db`), a single file you can delete to rebuild. The first scan
+  runs in the background; until it finishes, answers say that the index is incomplete.
+- **Shared by everyone** who can reach the bot — put in it only what all of them may read. Passages are given to the model as data, never instructions.
+- **Limits**: `--knowledge-max-file-mb` (50), `--knowledge-pdf-max-pages` (1000), `--knowledge-ocr-pages` (100; `0` = no OCR for the
+  knowledge base). Embeddings are searched in memory, which is comfortable up to a few hundred thousand passages (a 1024-dimension
+  model needs about 4 KB per passage); passage size is `--knowledge-chunk-chars` (1200) with `--knowledge-overlap` (150).
+- **Docker**: `docker-compose.yml` mounts `./knowledge` at `/knowledge` read-only, and the `ollama-pull` helper downloads
+  `JANNYQ_EMBED_MODEL` (`bge-m3` in `.env.example`). Drop files into `./knowledge` and wait half a minute.
 
 ## Conversation context: time and names
 
@@ -310,6 +340,7 @@ internal/llm        Provider interface; Ollama and OpenAI-compatible clients
 internal/agent      conversation loop, tool execution, compaction
 internal/session    per-chat SQLite storage with an LRU of open databases
 internal/tool       web_search, web_fetch, run_command, load_skill, read/search_attachment, SSRF-safe HTTP client
+internal/knowledge  shared knowledge base: chunking, SQLite store (FTS5 + vectors), hybrid search, folder indexer
 internal/attach     pictures (resize, EXIF), PDF text/OCR (sandbox or pure Go), text-file decoding
 internal/sandbox    command executor (limits, per-chat users), HTTP server and client
 internal/skill      skills loader
@@ -338,8 +369,8 @@ make docker
 3. ✅ **Web chat** and the shared webhook server (signature checks, rate limits, HTTPS with Caddy).
 4. ✅ **Pictures, PDFs and text files** — vision through the main model, PDFs read in the sandbox (OCR for scans),
    Telegram photos/documents/albums and web uploads.
-5. Knowledge base (RAG) from a folder of text/PDF files: SQLite, hybrid vector + full-text search, live sync
-   of edits and deletions, `knowledge_search` tool.
+5. ✅ **Knowledge base (RAG)** from a folder of text/PDF files: SQLite, hybrid vector + full-text search, live sync
+   of edits, deletions and renames, `knowledge_search` tool.
 6. Discord and LINE.
 7. Messenger and WhatsApp.
 8. Hardening and operations: per-session sandbox containers (Docker backend), metrics, backups, deployment guide.
@@ -349,6 +380,8 @@ make docker
 - `web_fetch` refuses non-public addresses and ignores proxy environment variables on purpose.
 - Files sent by users are untrusted: types are detected from content, pixel counts are checked before decoding,
   PDFs are parsed in the sandbox, and their text is framed as data. Don't set `--pdf-engine=native` for a public bot.
+- The knowledge base is shared by everyone who can talk to the bot; its passages reach the model as data. The folder is opened
+  as a root (links are not followed), so a link placed in it cannot expose other files.
 - Content returned by tools is untrusted; the system prompt tells the model not to follow instructions in it.
 - Don't expose the bot to everyone without `--rate-limit`; model time is the expensive resource.
 - Keep `JANNYQ_SANDBOX_TOKEN` secret and out of the sandbox container's volumes; rotate it if it leaks.

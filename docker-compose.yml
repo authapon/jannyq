@@ -33,11 +33,14 @@ services:
       # Pictures need a model that can see them (Ollama: e.g. gemma3, qwen2.5vl, llama3.2-vision).
       # JANNYQ_VISION=auto asks Ollama; set on/off to override.
       JANNYQ_SKILLS_DIR: /skills
+      # Shared knowledge base: put text and PDF files in ./knowledge (edits and deletions are followed).
+      JANNYQ_KNOWLEDGE_DIR: /knowledge
       # The web chat is off here; docker-compose.public.yml turns it on behind HTTPS.
       JANNYQ_WEB: ${JANNYQ_WEB:-false}
     volumes:
       - jannyq-data:/data
       - ./skills:/skills:ro
+      - ./knowledge:/knowledge:ro
     depends_on:
       searxng:
         condition: service_started
@@ -137,7 +140,7 @@ services:
       - ollama
     environment:
       OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/sh", "-c", "until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull \"$$MODEL\""]
+    entrypoint: ["/bin/sh", "-c", "until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull \"$$MODEL\"; if [ -n \"$$JANNYQ_EMBED_MODEL\" ]; then ollama pull \"$$JANNYQ_EMBED_MODEL\"; fi"]
     command: []
     env_file: .env
 

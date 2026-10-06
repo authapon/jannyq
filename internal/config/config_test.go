@@ -357,3 +357,29 @@ func TestAttachmentDefaultsAndValidation(t *testing.T) {
 		t.Errorf("env: %v %+v", err, c)
 	}
 }
+
+func TestKnowledgeSettings(t *testing.T) {
+	base := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	c, err := load(t, nil, base)
+	if err != nil || c.KnowledgeDir != "" || c.EmbedModel != "" || c.KnowledgeResults != 5 || c.KnowledgeMinSim != 0.25 {
+		t.Fatalf("defaults: %v %+v", err, c)
+	}
+	c, err = load(t, []string{"--knowledge-dir=/kb", "--embed-model=bge-m3"}, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_EMBED_API_KEY": "k"})
+	if err != nil || c.KnowledgeDir != "/kb" || c.EmbedModel != "bge-m3" || c.EmbedAPIKey != "k" || c.KnowledgeInterval != 30*time.Second {
+		t.Fatalf("%v %+v", err, c)
+	}
+	for _, bad := range [][]string{
+		{"--knowledge-dir=/kb", "--embed-provider=cohere"}, {"--knowledge-dir=/kb", "--knowledge-chunk-chars=50"},
+		{"--knowledge-dir=/kb", "--knowledge-overlap=900"}, {"--knowledge-dir=/kb", "--knowledge-results=50"},
+		{"--knowledge-dir=/kb", "--knowledge-min-similarity=1"}, {"--knowledge-dir=/kb", "--knowledge-interval=10ms"},
+		{"--knowledge-dir=/kb", "--knowledge-max-file-mb=0"},
+	} {
+		if _, err := load(t, bad, base); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+	// the knowledge settings are not checked while the feature is off
+	if _, err := load(t, []string{"--knowledge-results=50"}, base); err != nil {
+		t.Errorf("settings of a disabled feature were validated: %v", err)
+	}
+}

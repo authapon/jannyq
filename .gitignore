@@ -4,7 +4,8 @@
 
 # local runtime data
 /data/
-/knowledge/
+/knowledge/*
+!/knowledge/.gitkeep
 *.db
 *.db-wal
 *.db-shm

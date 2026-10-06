@@ -311,3 +311,45 @@ func TestOllamaSupportsVision(t *testing.T) {
 		t.Error("an unknown model must be an error, not 'no vision'")
 	}
 }
+
+func TestOllamaEmbed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Model string   `json:"model"`
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if r.URL.Path != "/api/embed" || in.Model != "emb" || len(in.Input) != 2 {
+			t.Errorf("request: %s %+v", r.URL.Path, in)
+		}
+		io.WriteString(w, `{"embeddings":[[1,0],[0,1]]}`)
+	}))
+	defer srv.Close()
+	v, err := (&Ollama{BaseURL: srv.URL, Client: srv.Client()}).Embed(context.Background(), "emb", []string{"a", "b"})
+	if err != nil || len(v) != 2 || v[1][1] != 1 {
+		t.Fatalf("%v %v", v, err)
+	}
+}
+
+func TestOpenAIEmbedKeepsOrderAndChecksShape(t *testing.T) {
+	body := `{"data":[{"index":1,"embedding":[0,1,0]},{"index":0,"embedding":[1,0,0]}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/embeddings" || r.Header.Get("Authorization") != "Bearer k" {
+			t.Errorf("request: %s %q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	o := &OpenAI{BaseURL: srv.URL + "/v1", APIKey: "k", Client: srv.Client()}
+	v, err := o.Embed(context.Background(), "emb", []string{"a", "b"})
+	if err != nil || v[0][0] != 1 || v[1][1] != 1 {
+		t.Fatalf("order: %v %v", v, err)
+	}
+	if _, err := o.Embed(context.Background(), "emb", []string{"a", "b", "c"}); err == nil {
+		t.Error("a missing embedding was accepted")
+	}
+	body = `{"data":[{"index":0,"embedding":[1,0]},{"index":1,"embedding":[1]}]}`
+	if _, err := o.Embed(context.Background(), "emb", []string{"a", "b"}); err == nil {
+		t.Error("vectors of different lengths were accepted")
+	}
+}

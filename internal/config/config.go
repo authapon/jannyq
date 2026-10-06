@@ -101,6 +101,22 @@ type Config struct {
 	WebMaxUploadMB    int
 	WebMaxFiles       int
 
+	// Knowledge base
+	KnowledgeDir        string
+	KnowledgeDB         string
+	EmbedModel          string
+	EmbedProvider       string
+	EmbedBaseURL        string
+	EmbedAPIKey         string
+	KnowledgeInterval   time.Duration
+	KnowledgeChunkChars int
+	KnowledgeOverlap    int
+	KnowledgeResults    int
+	KnowledgeMinSim     float64
+	KnowledgeMaxFileMB  int
+	KnowledgePDFPages   int
+	KnowledgeOCRPages   int
+
 	// Channels
 	TelegramToken string
 	TelegramAPI   string
@@ -308,6 +324,22 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.integer(&c.WebMaxUploadMB, "web-max-upload-mb", 10, "largest file the web chat accepts, in MB")
 	l.integer(&c.WebMaxFiles, "web-max-files", 4, "files per message in the web chat")
 
+	// Knowledge base
+	l.str(&c.KnowledgeDir, "knowledge-dir", "", "folder of text and PDF files for the shared knowledge base (searched with knowledge_search); empty disables it")
+	l.str(&c.KnowledgeDB, "knowledge-db", "", "knowledge base database file (default <data-dir>/knowledge.db)")
+	l.str(&c.EmbedModel, "embed-model", "", "embedding model for semantic search, e.g. nomic-embed-text or bge-m3; empty searches by words only")
+	l.str(&c.EmbedProvider, "embed-provider", "", "API of the embedding model: ollama or openai (default: --llm-provider)")
+	l.str(&c.EmbedBaseURL, "embed-base-url", "", "embedding API base URL (default: --llm-base-url)")
+	l.secret(&c.EmbedAPIKey, "embed-api-key", "API key for the embedding endpoint (default: --llm-api-key)")
+	l.duration(&c.KnowledgeInterval, "knowledge-interval", 30*time.Second, "how often the knowledge folder is scanned for changes")
+	l.integer(&c.KnowledgeChunkChars, "knowledge-chunk-chars", 1200, "size of a knowledge passage in characters")
+	l.integer(&c.KnowledgeOverlap, "knowledge-overlap", 150, "characters shared by neighbouring passages")
+	l.integer(&c.KnowledgeResults, "knowledge-results", 5, "passages returned by a knowledge search")
+	l.float(&c.KnowledgeMinSim, "knowledge-min-similarity", 0.25, "least cosine similarity for a semantic match (0-1)")
+	l.integer(&c.KnowledgeMaxFileMB, "knowledge-max-file-mb", 50, "largest knowledge file in MB; larger files are skipped")
+	l.integer(&c.KnowledgePDFPages, "knowledge-pdf-max-pages", 1000, "longest PDF indexed, in pages")
+	l.integer(&c.KnowledgeOCRPages, "knowledge-ocr-pages", 100, "pages of one scanned PDF that are recognised with OCR; 0 turns OCR off for the knowledge base")
+
 	// Channels
 	l.secret(&c.TelegramToken, "telegram-token", "Telegram bot token; enables the Telegram channel")
 	l.str(&c.TelegramAPI, "telegram-api", "https://api.telegram.org", "Telegram Bot API base URL")
@@ -489,6 +521,31 @@ func (c *Config) validate() error {
 				bad("--ocr-langs must be like eng+tha, auto or off")
 				break
 			}
+		}
+	}
+	if c.KnowledgeDir != "" {
+		switch c.EmbedProvider {
+		case "", "ollama", "openai":
+		default:
+			bad("--embed-provider must be ollama or openai")
+		}
+		if c.KnowledgeChunkChars < 200 || c.KnowledgeChunkChars > 20000 {
+			bad("--knowledge-chunk-chars must be between 200 and 20000")
+		}
+		if c.KnowledgeOverlap < 0 || c.KnowledgeOverlap > c.KnowledgeChunkChars/2 {
+			bad("--knowledge-overlap must be between 0 and half of --knowledge-chunk-chars")
+		}
+		if c.KnowledgeResults < 1 || c.KnowledgeResults > 10 {
+			bad("--knowledge-results must be between 1 and 10")
+		}
+		if c.KnowledgeMinSim < 0 || c.KnowledgeMinSim >= 1 {
+			bad("--knowledge-min-similarity must be in [0, 1)")
+		}
+		if c.KnowledgeMaxFileMB < 1 || c.KnowledgePDFPages < 1 || c.KnowledgeOCRPages < 0 {
+			bad("--knowledge-max-file-mb and --knowledge-pdf-max-pages must be at least 1, --knowledge-ocr-pages not negative")
+		}
+		if c.KnowledgeInterval < time.Second {
+			bad("--knowledge-interval must be at least 1s")
 		}
 	}
 	if c.WebMaxUploadMB < 1 || c.WebMaxFiles < 1 {

@@ -124,6 +124,15 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		log.Info("skills loaded", "dir", cfg.SkillsDir, "count", len(skills.Summaries()))
 	}
 
+	kbase, err := newKnowledge(ctx, cfg, runner, log)
+	if err != nil {
+		return err
+	}
+	if kbase != nil {
+		defer kbase.store.Close()
+		kbase.register(tools, cfg)
+	}
+
 	var temp *float64
 	if cfg.Temperature >= 0 {
 		t := cfg.Temperature
@@ -263,6 +272,13 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 			if err := srv.Run(runCtx); err != nil {
 				errc <- fmt.Errorf("http server: %w", err)
 			}
+		}()
+	}
+	if kbase != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			kbase.ix.Run(runCtx)
 		}()
 	}
 	active := len(channels)
