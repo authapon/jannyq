@@ -504,13 +504,18 @@ monitoring, backups and restore drills, upgrades, data retention and a systemd v
   level=INFO msg="user connected" channel=telegram user=123456789 name="Ann Lee" chat=123456789 group=false
   level=INFO msg="message received" channel=telegram chat=123456789 user=123456789 group=false addressed=true chars=34 files=0
   level=INFO msg="tool call" tool=knowledge_search chat=telegram:123456789 user=123456789 duration=41ms bytes=5230
-  level=INFO msg=reply channel=telegram chat=123456789 user=123456789 result=ok delivered=true chars=412 took=8.2s
+  level=INFO msg=reply channel=telegram chat=123456789 user=123456789 result=ok delivered=true chars=412 took=8.2s context=2400/20000
   ```
 
   *user connected* is the first message of a user since the bot started (for the web chat, a visitor opening the page, with a short
   hash instead of the visitor id: `web visitor connected`, `web chat opened`/`closed`). Messages turned away are logged too
   (`message from user that is not allowed`, `message refused: rate limit`, `webhook refused: bad signature`), as are commands, the
   introduction, tool calls, indexing, backups, channel start and stop and shutdown. Texts, answers and tool arguments are not logged.
+  `context=2400/20000` on the *reply* line is how much of the model's context window the chat uses: the size of the prompt of its
+  latest model call plus the answer, in tokens, out of `--context-size` (`2400/?` when no context size is set, `~2400/20000` when
+  the model server reports no token counts and the figure is estimated). It is the number to watch: when it nears the size the chat is
+  compacted (`--compact-ratio`). It reflects the chat since the bot started; Ollama may count only the part of a long prompt it did not
+  already have cached, in which case the figure reads low.
   Group messages that are only kept as context appear at `--log-level debug`, together with every model request (tokens, timing).
 
 ## Public deployment (HTTPS)

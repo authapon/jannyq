@@ -1271,3 +1271,31 @@ func TestConsoleLogShowsActivityButNeverMessageText(t *testing.T) {
 		t.Errorf("group chatter should be logged at debug level:\n%s", out)
 	}
 }
+
+func TestReplyLogShowsHowMuchOfTheContextIsUsed(t *testing.T) {
+	run := func(size int, usage llm.Usage) string {
+		var buf syncBuffer
+		log := slog.New(slog.NewTextHandler(&buf, nil))
+		sm := session.NewManager(t.TempDir(), 8, 4)
+		t.Cleanup(func() { sm.Close() })
+		f := &fakeLLM{reply: func(llm.Request) (*llm.Response, error) {
+			return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: "pong"}, Usage: usage}, nil
+		}}
+		ag := agent.New(agent.Config{Model: "m", ContextSize: size, Location: time.UTC}, f, nil, log)
+		r := New(Config{}, sm, ag, i18n.New("en"), log)
+		r.Handle(ctx, msg(&recorder{}, "hello"))
+		return buf.String()
+	}
+	// the prompt of the model's last call plus its answer, out of the context size
+	if out := run(20000, llm.Usage{PromptTokens: 2000, CompletionTokens: 400}); !strings.Contains(out, "context=2400/20000") {
+		t.Errorf("reported tokens:\n%s", out)
+	}
+	// a server that reports nothing: estimated, and marked as such
+	if out := run(20000, llm.Usage{}); !strings.Contains(out, "context=~") || !strings.Contains(out, "/20000") {
+		t.Errorf("estimated:\n%s", out)
+	}
+	// no context size configured
+	if out := run(0, llm.Usage{PromptTokens: 2000, CompletionTokens: 400}); !strings.Contains(out, "context=2400/?") {
+		t.Errorf("unknown size:\n%s", out)
+	}
+}

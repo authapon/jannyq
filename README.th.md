@@ -366,8 +366,12 @@ Ollama: `'{"keep_alive":"30m"}'` (`options` จะถูกรวมกับท
 level=INFO msg="user connected" channel=telegram user=123456789 name="Ann Lee" chat=123456789 group=false
 level=INFO msg="message received" channel=telegram chat=123456789 user=123456789 group=false addressed=true chars=34 files=0
 level=INFO msg="tool call" tool=knowledge_search chat=telegram:123456789 user=123456789 duration=41ms bytes=5230
-level=INFO msg=reply channel=telegram chat=123456789 user=123456789 result=ok delivered=true chars=412 took=8.2s
+level=INFO msg=reply channel=telegram chat=123456789 user=123456789 result=ok delivered=true chars=412 took=8.2s context=2400/20000
 ```
+
+`context=2400/20000` ในบรรทัด *reply* คือการใช้หน้าต่างบริบทของโมเดลของแชทนั้น: ขนาด prompt ของการเรียกโมเดลล่าสุดรวมคำตอบ เป็นจำนวน token
+จาก `--context-size` (ขึ้น `2400/?` ถ้าไม่ได้ตั้ง context size, ขึ้น `~2400/20000` ถ้าเซิร์ฟเวอร์โมเดลไม่รายงานจำนวน token แล้วระบบประมาณเอง)
+เป็นตัวเลขที่ควรดู: เมื่อใกล้เต็มแชทจะถูกสรุป (compact) ตาม `--compact-ratio` ตัวเลขนับตั้งแต่เริ่มบอท และ Ollama อาจนับเฉพาะส่วนของ prompt ยาว ๆ ที่ยังไม่อยู่ใน cache ซึ่งทำให้ตัวเลขต่ำกว่าจริง
 
 *user connected* คือข้อความแรกของผู้ใช้คนนั้นนับตั้งแต่เริ่มบอท (web chat: ผู้เข้าชมเปิดหน้าเว็บ แสดงด้วย hash สั้น ๆ แทน ID: `web visitor connected`,
 `web chat opened`/`closed`) log ยังแสดงข้อความที่ถูกปฏิเสธ (`message from user that is not allowed`, `message refused: rate limit`, `webhook refused: bad signature`),

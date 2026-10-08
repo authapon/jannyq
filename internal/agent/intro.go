@@ -56,6 +56,7 @@ func (a *Agent) Introduce(ctx context.Context, s *session.Session, in Input, ext
 	if err != nil {
 		return "", err
 	}
+	a.noteUse(key, llm.Request{Messages: msgs}, resp)
 	text := cleanReply(resp.Message.Content)
 	if text == "" {
 		return "", ErrEmptyResponse

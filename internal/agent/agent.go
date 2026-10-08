@@ -11,7 +11,9 @@ import (
 	"github.com/authapon/jannyq/internal/metrics"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -128,6 +130,64 @@ type Agent struct {
 	now      func() time.Time
 
 	toolsUnsupported atomic.Bool
+
+	usageMu sync.Mutex
+	usage   map[string]ContextUse // by chat key: what the latest model call of the chat used
+}
+
+// maxUsageEntries bounds the usage table (chats seen since start-up).
+const maxUsageEntries = 20000
+
+// ContextUse says how much of the model's context window a chat uses.
+type ContextUse struct {
+	// Used is the size of the prompt of the chat's latest model call plus the
+	// answer to it, in tokens: what the conversation starts the next call with.
+	Used int
+	// Size is the context size (--context-size), 0 when it is not known.
+	Size int
+	// Estimated is true when the model server reported no token count and Used
+	// was estimated from the text.
+	Estimated bool
+}
+
+// String formats the use as "2400/20000" ("~2400/20000" when estimated,
+// "2400/?" when the context size is not known).
+func (c ContextUse) String() string {
+	size := "?"
+	if c.Size > 0 {
+		size = strconv.Itoa(c.Size)
+	}
+	mark := ""
+	if c.Estimated {
+		mark = "~"
+	}
+	return fmt.Sprintf("%s%d/%s", mark, c.Used, size)
+}
+
+// ContextUse reports the context use of a chat ("channel:chat") as of its
+// latest model call since start-up.
+func (a *Agent) ContextUse(chatKey string) (ContextUse, bool) {
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	u, ok := a.usage[chatKey]
+	return u, ok
+}
+
+// noteUse records the context use after a model call.
+func (a *Agent) noteUse(chatKey string, req llm.Request, resp *llm.Response) {
+	u := ContextUse{Size: a.cfg.ContextSize}
+	if resp.Usage.PromptTokens > 0 {
+		u.Used = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+	} else {
+		u.Used = llm.EstimateMessages(req.Messages) + llm.EstimateTokens(resp.Message.Content)
+		u.Estimated = true
+	}
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	if a.usage == nil || len(a.usage) >= maxUsageEntries {
+		a.usage = map[string]ContextUse{}
+	}
+	a.usage[chatKey] = u
 }
 
 // New creates an Agent.
@@ -307,6 +367,7 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		if resp.Usage.PromptTokens > 0 {
 			_ = s.SetLastPromptTokens(ctx, resp.Usage.PromptTokens)
 		}
+		a.noteUse(cc.SessionKey, req, resp)
 
 		reply := resp.Message
 		if len(reply.ToolCalls) == 0 || final {

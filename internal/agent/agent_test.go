@@ -593,3 +593,38 @@ func TestPrefetchModes(t *testing.T) {
 		t.Errorf("queries = %q", r.queries)
 	}
 }
+
+func TestContextUse(t *testing.T) {
+	if got := (ContextUse{Used: 2400, Size: 20000}).String(); got != "2400/20000" {
+		t.Errorf("%q", got)
+	}
+	if got := (ContextUse{Used: 2400, Size: 20000, Estimated: true}).String(); got != "~2400/20000" {
+		t.Errorf("%q", got)
+	}
+	if got := (ContextUse{Used: 2400}).String(); got != "2400/?" {
+		t.Errorf("%q", got)
+	}
+
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		callTool("c1", "echo", `{}`), // the first call reports its tokens...
+		func(llm.Request) (*llm.Response, error) { // ...the last one grows with the tool result
+			return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}, Usage: llm.Usage{PromptTokens: 900, CompletionTokens: 100}}, nil
+		},
+	}}
+	a := newAgent(p, Config{ContextSize: 8192}, &echoTool{})
+	withSession(t, func(s *session.Session) {
+		if _, ok := a.ContextUse(s.Channel + ":" + s.ChatID); ok {
+			t.Error("nothing has been used yet")
+		}
+		if _, err := a.Reply(ctx, s, Input{Text: "q"}); err != nil {
+			t.Fatal(err)
+		}
+		u, ok := a.ContextUse(s.Channel + ":" + s.ChatID)
+		if !ok || u.Used != 1000 || u.Size != 8192 || u.Estimated {
+			t.Errorf("use = %+v (the latest call counts, not the first), ok=%v", u, ok)
+		}
+		if _, ok := a.ContextUse("other:chat"); ok {
+			t.Error("another chat has no use")
+		}
+	})
+}

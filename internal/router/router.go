@@ -375,8 +375,12 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 	if sendErr != nil {
 		r.log.Error("send failed", "channel", in.Channel, "chat", in.ChatID, "err", sendErr)
 	}
-	r.log.Info("reply", "channel", in.Channel, "chat", in.ChatID, "user", in.UserID, "result", result,
-		"delivered", sendErr == nil, "chars", utf8.RuneCountInString(reply), "took", time.Since(began).Round(time.Millisecond))
+	attrs := []any{"channel", in.Channel, "chat", in.ChatID, "user", in.UserID, "result", result,
+		"delivered", sendErr == nil, "chars", utf8.RuneCountInString(reply), "took", time.Since(began).Round(time.Millisecond)}
+	if use, ok := r.agent.ContextUse(in.Channel + ":" + in.ChatID); ok {
+		attrs = append(attrs, "context", use.String())
+	}
+	r.log.Info("reply", attrs...)
 
 	// Compaction runs after the reply so the user is not kept waiting.
 	cctx, ccancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
