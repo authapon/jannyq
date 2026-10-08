@@ -75,6 +75,9 @@ func newRouterWith(t *testing.T, p llm.Provider, cfg Config, acfg agent.Config) 
 		acfg.Location = time.UTC
 	}
 	ag := agent.New(acfg, p, nil, log)
+	// The greeting would clutter every expectation below, so it is off unless
+	// a test names the bot, which is what the greeting needs.
+	cfg.NoIntro = cfg.NoIntro || cfg.BotName == ""
 	return New(cfg, sm, ag, i18n.New("en"), log)
 }
 
@@ -821,4 +824,103 @@ func TestABusyChatStillKeepsTheMessage(t *testing.T) {
 	}
 	close(gate)
 	wg.Wait()
+}
+
+func TestNoCommandsLeavesSlashTextToTheModel(t *testing.T) {
+	f := &fakeLLM{}
+	r := newRouter(t, f, Config{NoCommands: true})
+	rec := &recorder{}
+
+	for _, text := range []string{"/help", "/start", "/compact", "remember: blue", "/reset", "what colour?"} {
+		r.Handle(ctx, msg(rec, text))
+	}
+	if f.calls() != 6 {
+		t.Fatalf("model calls = %d, want 6: every message goes to the model", f.calls())
+	}
+	f.mu.Lock()
+	last := f.requests[len(f.requests)-1].Messages
+	f.mu.Unlock()
+	if len(last) < 11 { // system + 6 questions + 5 answers: nothing was forgotten
+		t.Errorf("/reset must not clear the chat when commands are off, the model saw %d messages", len(last))
+	}
+	for _, s := range rec.all() {
+		if strings.Contains(s, "Commands:") || strings.Contains(s, "cleared") {
+			t.Errorf("a command reply was sent: %q", s)
+		}
+	}
+}
+
+func TestIntroducesItselfOncePerChat(t *testing.T) {
+	f := &fakeLLM{}
+	r := newRouter(t, f, Config{BotName: "Janny"})
+	rec := &recorder{}
+
+	r.Handle(ctx, msg(rec, "hi"))
+	r.Handle(ctx, msg(rec, "and again"))
+	got := rec.all()
+	if len(got) != 3 || !strings.HasPrefix(got[0], "Hi! I'm Janny,") || !strings.Contains(got[0], "/help") || got[1] != "pong" || got[2] != "pong" {
+		t.Fatalf("sent = %q", got)
+	}
+
+	// a reset does not make the bot introduce itself again
+	r.Handle(ctx, msg(rec, "/reset"))
+	r.Handle(ctx, msg(rec, "hello again"))
+	if got = rec.all(); len(got) != 5 || got[3] != "Done. This conversation has been cleared." || got[4] != "pong" {
+		t.Errorf("after reset: %q", got)
+	}
+
+	// another chat is introduced to
+	other := &recorder{}
+	in := msg(other, "hi")
+	in.ChatID = "c2"
+	r.Handle(ctx, in)
+	if got = other.all(); len(got) != 2 || !strings.HasPrefix(got[0], "Hi! I'm Janny") {
+		t.Errorf("second chat: %q", got)
+	}
+}
+
+func TestIntroductionFitsTheSetup(t *testing.T) {
+	// no commands: the greeting must not point at /help
+	r := newRouter(t, &fakeLLM{}, Config{BotName: "Janny", NoCommands: true})
+	rec := &recorder{}
+	r.Handle(ctx, msg(rec, "hi"))
+	if got := rec.all(); len(got) != 2 || strings.Contains(got[0], "/help") || !strings.Contains(got[0], "Janny") {
+		t.Errorf("no commands: %q", got)
+	}
+
+	// switched off
+	r = newRouter(t, &fakeLLM{}, Config{BotName: "Janny", NoIntro: true})
+	rec = &recorder{}
+	r.Handle(ctx, msg(rec, "hi"))
+	if got := rec.all(); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("intro off: %q", got)
+	}
+
+	// a first message that is a command is answered by the command alone
+	r = newRouter(t, &fakeLLM{}, Config{BotName: "Janny"})
+	rec = &recorder{}
+	r.Handle(ctx, msg(rec, "/help"))
+	if got := rec.all(); len(got) != 1 || !strings.Contains(got[0], "Commands:") {
+		t.Errorf("first command: %q", got)
+	}
+}
+
+func TestOnlyOneOfSimultaneousFirstMessagesIsGreeted(t *testing.T) {
+	r := newRouter(t, &fakeLLM{}, Config{BotName: "Janny"})
+	rec := &recorder{}
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); r.Handle(ctx, msg(rec, "hi")) }()
+	}
+	wg.Wait()
+	n := 0
+	for _, s := range rec.all() {
+		if strings.HasPrefix(s, "Hi! I'm Janny") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("greetings = %d, want 1", n)
+	}
 }

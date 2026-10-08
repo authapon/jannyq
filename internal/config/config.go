@@ -91,6 +91,8 @@ type Config struct {
 	AttachChatMB      int // disk space of one chat's files
 	AttachInlineChars int
 	AttachInbox       bool // copy files into the run_command workspace
+	Intro             bool // greet each chat the first time the bot answers in it
+	Commands          bool // chat commands (/help, /reset, /compact) are available
 	ImageMaxEdge      int
 	ImageMessages     int // latest messages whose pictures are sent to the model
 	PDFEngine         string
@@ -341,6 +343,8 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.integer(&c.AttachRate, "attach-rate", 10, "files per user per minute; 0 = unlimited")
 	l.integer(&c.AttachChatMB, "attach-chat-mb", 200, "disk space for the files of one chat in MB; the oldest are deleted beyond it")
 	l.integer(&c.AttachInlineChars, "attach-inline-chars", 6000, "longest document text shown in the conversation itself; longer documents are read with read_attachment")
+	l.boolean(&c.Intro, "intro", true, "introduce the bot, in --lang, the first time it answers in a chat")
+	l.boolean(&c.Commands, "commands", true, "chat commands /help, /reset and /compact (false: no slash commands at all, every message goes to the model)")
 	l.boolean(&c.AttachInbox, "attach-inbox", true, "also copy files into the run_command workspace (inbox/) when commands are enabled")
 	l.integer(&c.ImageMaxEdge, "image-max-edge", 1568, "pictures are shrunk so that their longer side is at most this many pixels")
 	l.integer(&c.ImageMessages, "image-messages", 3, "how many of the latest messages with pictures are sent to the model with their pictures")

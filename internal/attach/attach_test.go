@@ -386,7 +386,7 @@ func TestSniffingIgnoresNameAndDeclaredType(t *testing.T) {
 	}
 	// an executable is refused whatever it is called
 	elf := append([]byte("\x7fELF"), make([]byte, 100)...)
-	if _, err := p.Process(bg, "w", Input{Name: "readme.txt", MIME: "text/plain", Data: elf}); !errors.Is(err, ErrUnsupported) {
+	if _, err := p.Process(bg, "w", Input{Name: "readme.txt", MIME: "text/plain", Data: elf}); !errors.Is(err, ErrNotText) {
 		t.Errorf("elf: %v", err)
 	}
 	if _, err := p.Process(bg, "w", Input{Name: "x.zip", Data: []byte("PK\x03\x04....")}); !errors.Is(err, ErrUnsupported) {
@@ -440,7 +440,7 @@ func TestTextFiles(t *testing.T) {
 		t.Error("paging lost or changed text")
 	}
 	// binary rubbish named .txt
-	if _, err := process(p, "a.txt", []byte("abc\x00\x01\x02def")); !errors.Is(err, ErrUnsupported) {
+	if _, err := process(p, "a.txt", []byte("abc\x00\x01\x02def")); !errors.Is(err, ErrNotText) {
 		t.Errorf("binary: %v", err)
 	}
 	// control characters and the page separator are not passed through
@@ -565,6 +565,64 @@ func TestInboxPath(t *testing.T) {
 		}
 		if strings.ContainsAny(got[len("inbox/"):], "/\\ ;$'\"`&|<>*?") {
 			t.Errorf("%q needs quoting", got)
+		}
+	}
+}
+
+// A file longer than the sample looked at is cut wherever the sample ends, often
+// in the middle of a Thai character (three bytes). That must not make valid text
+// look like binary data.
+func TestLongUTF8TextIsAcceptedWhereverTheSampleEnds(t *testing.T) {
+	p := New(Config{}, quiet())
+	line := "การตั้งค่าระบบปฏิบัติการและเครื่องมือสำหรับนักพัฒนา 🚀 ├── src\n"
+	for pad := 0; pad < 8; pad++ {
+		body := strings.Repeat("a", pad) + strings.Repeat(line, 300)
+		if len(body) < 3*sampleSize {
+			t.Fatal("the test file is too short to be cut")
+		}
+		res, err := process(p, "OS1.md", []byte(body))
+		if err != nil || !strings.Contains(res.Text, "การตั้งค่าระบบ") {
+			t.Errorf("pad %d: %v", pad, err)
+		}
+		if res != nil && strings.ContainsRune(res.Text, '\uFFFD') {
+			t.Errorf("pad %d: valid text came out damaged", pad)
+		}
+	}
+}
+
+func TestTextWithAFewDamagedBytesIsStillText(t *testing.T) {
+	p := New(Config{}, quiet())
+	body := strings.Repeat("สวัสดีครับ ยินดีต้อนรับ — ├── tree\n", 200)
+	data := []byte(body[:500] + "\x96" + body[500:]) // one stray byte, as pasted text often has
+	res, err := process(p, "notes.md", data)
+	if err != nil || !strings.Contains(res.Text, "สวัสดีครับ") || !strings.Contains(res.Note, "damaged") {
+		t.Fatalf("%v %+v", err, res)
+	}
+	// the Thai text next to the stray byte is still decoded as UTF-8, not as Windows-874
+	if strings.Contains(res.Text, "à¸") || strings.Contains(res.Text, "เธ") {
+		t.Errorf("UTF-8 was decoded as another encoding: %q", res.Text[:80])
+	}
+}
+
+func TestTextEncodings(t *testing.T) {
+	long := strings.Repeat("x", 9000)
+	for name, c := range map[string]struct {
+		data []byte
+		want string
+	}{
+		"empty":              {nil, "utf-8"},
+		"ascii":              {[]byte("hello"), "utf-8"},
+		"bom":                {append([]byte{0xef, 0xbb, 0xbf}, "x"...), "utf-8"},
+		"utf-16":             {[]byte{0xff, 0xfe, 'h', 0}, "utf-16"},
+		"nul":                {[]byte("abc\x00def"), ""},
+		"nul far away":       {[]byte(long + "\x00"), "utf-8"}, // beyond the sample: not looked at
+		"tis-620":            {[]byte("\xa1\xd2\xc3\xb7\xb4\xcb\xc5\xd2\xc2 \xa1\xd2\xc3"), "windows-874"},
+		"binary":             {[]byte("\x89\x01\x02\xfe\xfd\xfc\xfb\xfa\xf9"), ""},
+		"cut after one byte": {[]byte(strings.Repeat("a", sampleSize-1) + "ก"), "utf-8"},
+		"cut after two":      {[]byte(strings.Repeat("a", sampleSize-2) + "ก"), "utf-8"},
+	} {
+		if got := textEncoding(c.data); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
 		}
 	}
 }

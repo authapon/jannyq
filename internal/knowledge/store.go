@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schema = `
 CREATE TABLE IF NOT EXISTS files (
@@ -94,6 +94,19 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init knowledge db: %w", err)
+	}
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if version == 1 {
+		// Version 1 wrongly refused some valid UTF-8 text files as binary data. Files recorded as failed
+		// are read again once: an impossible size makes the next scan treat them as changed.
+		if _, err := db.Exec(`UPDATE files SET size = -1, mtime_ns = 0 WHERE status != 'ok'`); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		db.Close()

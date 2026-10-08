@@ -476,3 +476,18 @@ func TestOperationsSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandsCanBeSwitchedOff(t *testing.T) {
+	model := map[string]string{"JANNYQ_LLM_MODEL": "qwen3"}
+	c, err := load(t, nil, model)
+	if err != nil || !c.Commands {
+		t.Fatalf("default: err=%v", err)
+	}
+	c, err = load(t, nil, map[string]string{"JANNYQ_LLM_MODEL": "qwen3", "JANNYQ_COMMANDS": "false"})
+	if err != nil || c.Commands {
+		t.Fatalf("env: err=%v", err)
+	}
+	if c, err = load(t, []string{"--commands=false"}, model); err != nil || c.Commands {
+		t.Fatalf("flag: err=%v", err)
+	}
+}

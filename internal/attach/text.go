@@ -36,15 +36,18 @@ func decodeText(data []byte) (string, string) {
 			return string(out), "UTF-16"
 		}
 	}
-	if utf8.Valid(data) {
-		return string(data), ""
-	}
-	if thaiLegacy(data) {
+	switch textEncoding(data) {
+	case "utf-8":
+		if utf8.Valid(data) {
+			return string(data), ""
+		}
+		return strings.ToValidUTF8(string(data), "\uFFFD"), "damaged characters replaced"
+	case "windows-874":
 		if out, err := charmap.Windows874.NewDecoder().Bytes(data); err == nil {
 			return string(out), "Windows-874"
 		}
 	}
-	return strings.ToValidUTF8(string(data), "�"), "unknown encoding"
+	return strings.ToValidUTF8(string(data), "\uFFFD"), "unknown encoding"
 }
 
 // cleanText normalises line endings and drops control characters that would

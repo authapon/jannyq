@@ -857,3 +857,34 @@ func TestSweepOfAMissingDirectory(t *testing.T) {
 		t.Errorf("%d %v", n, err)
 	}
 }
+
+func TestFirstReply(t *testing.T) {
+	withSession(t, func(s *Session) {
+		// questions alone do not count as having been answered
+		if err := s.Append(ctx, user("hello")); err != nil {
+			t.Fatal(err)
+		}
+		if first, err := s.FirstReply(ctx); err != nil || !first {
+			t.Fatalf("first = %v, err = %v", first, err)
+		}
+		if first, _ := s.FirstReply(ctx); first {
+			t.Error("a chat is greeted once")
+		}
+		if err := s.Reset(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if first, _ := s.FirstReply(ctx); first {
+			t.Error("a reset must not bring the greeting back")
+		}
+	})
+
+	// a chat that already has answers (it predates the greeting) is marked, not greeted
+	withSession(t, func(s *Session) {
+		if err := s.Append(ctx, user("hello"), assistant("hi")); err != nil {
+			t.Fatal(err)
+		}
+		if first, err := s.FirstReply(ctx); err != nil || first {
+			t.Errorf("existing chat: first = %v, err = %v", first, err)
+		}
+	})
+}

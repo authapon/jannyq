@@ -40,13 +40,18 @@ func sniff(name, declaredMIME string, data []byte) (kind, mime string) {
 	case hasPDFHeader(data):
 		return KindPDF, "application/pdf"
 	}
-	ext := strings.ToLower(filepath.Ext(name))
-	declaredText := strings.HasPrefix(strings.ToLower(declaredMIME), "text/") ||
-		strings.Contains(strings.ToLower(declaredMIME), "json") || strings.Contains(strings.ToLower(declaredMIME), "xml")
-	if (textExtensions[ext] || declaredText) && looksLikeText(data) {
+	if claimsText(name, declaredMIME) && textEncoding(data) != "" {
 		return KindText, "text/plain"
 	}
 	return "", ""
+}
+
+// claimsText reports whether the name or the declared type say "text". Text has
+// no signature, so they are all there is to go on before looking at the bytes.
+func claimsText(name, declaredMIME string) bool {
+	mime := strings.ToLower(declaredMIME)
+	return textExtensions[strings.ToLower(filepath.Ext(name))] ||
+		strings.HasPrefix(mime, "text/") || strings.Contains(mime, "json") || strings.Contains(mime, "xml")
 }
 
 // hasPDFHeader reports whether "%PDF-" appears in the first kilobyte, where
@@ -59,27 +64,69 @@ func hasPDFHeader(data []byte) bool {
 	return bytes.Contains(head, []byte("%PDF-"))
 }
 
-// looksLikeText rejects binary data: text may not contain NUL bytes (except in
-// UTF-16, which has a byte order mark) and must be UTF-8 or a recognisable
-// legacy encoding.
-func looksLikeText(data []byte) bool {
+// sampleSize is how much of a file is looked at to tell text from binary data.
+const sampleSize = 8192
+
+// textEncoding says how a file is encoded when it is text ("utf-8", "utf-16" or
+// "windows-874"), and "" when it is not: it may not contain NUL bytes (except
+// UTF-16, which has a byte order mark) and must be UTF-8, with at most a few
+// damaged bytes, or a recognisable Thai legacy encoding.
+func textEncoding(data []byte) string {
 	if len(data) == 0 {
-		return true
+		return "utf-8"
+	}
+	switch {
+	case bytes.HasPrefix(data, []byte{0xef, 0xbb, 0xbf}):
+		return "utf-8"
+	case bytes.HasPrefix(data, []byte{0xff, 0xfe}), bytes.HasPrefix(data, []byte{0xfe, 0xff}):
+		return "utf-16"
 	}
 	head := data
-	if len(head) > 8192 {
-		head = head[:8192]
-	}
-	if bytes.HasPrefix(head, []byte{0xff, 0xfe}) || bytes.HasPrefix(head, []byte{0xfe, 0xff}) {
-		return true // UTF-16 with a byte order mark
+	if len(head) > sampleSize {
+		// the sample ends wherever it ends, often in the middle of a character
+		head = trimPartialRune(head[:sampleSize])
 	}
 	if bytes.IndexByte(head, 0) >= 0 {
-		return false
+		return ""
 	}
-	if utf8.Valid(head) || utf8.Valid(head[:len(head)-min(len(head), 3)]) {
-		return true
+	if mostlyUTF8(head) { // before the legacy guess: UTF-8 Thai also has bytes in the Thai range of Windows-874
+		return "utf-8"
 	}
-	return thaiLegacy(head)
+	if thaiLegacy(head) {
+		return "windows-874"
+	}
+	return ""
+}
+
+// trimPartialRune drops an incomplete character from the end of b.
+func trimPartialRune(b []byte) []byte {
+	for i := 1; i <= 3 && i <= len(b); i++ {
+		c := b[len(b)-i]
+		if c&0xC0 == 0x80 {
+			continue // a continuation byte: look further back for its first byte
+		}
+		if c >= 0xC0 && !utf8.FullRune(b[len(b)-i:]) {
+			return b[:len(b)-i]
+		}
+		return b
+	}
+	return b
+}
+
+// mostlyUTF8 accepts text in which no more than one character in a hundred is
+// damaged, as happens to files that were pasted together or edited by tools that
+// disagree about encodings.
+func mostlyUTF8(b []byte) bool {
+	bad, total := 0, 0
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		if r == utf8.RuneError && size <= 1 {
+			bad++
+		}
+		total++
+		b = b[size:]
+	}
+	return bad*100 <= total
 }
 
 // thaiLegacy guesses Windows-874 / TIS-620, still common in Thai spreadsheets:

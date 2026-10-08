@@ -372,6 +372,8 @@ func reason(err error) string {
 		return "the document has too many pages"
 	case errors.Is(err, attach.ErrScanned):
 		return "a scanned PDF without text, and text recognition is not available"
+	case errors.Is(err, attach.ErrNotText):
+		return "the file is not readable text: binary data, or a character encoding that is not UTF-8"
 	case errors.Is(err, attach.ErrUnsupported):
 		return "unsupported type of file"
 	}

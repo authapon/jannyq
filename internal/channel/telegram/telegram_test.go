@@ -25,6 +25,32 @@ func newChannel(base string) *Channel {
 	return c
 }
 
+func TestConvertWithoutCommands(t *testing.T) {
+	c := newChannel("http://unused")
+	c.cfg.NoCommands = true
+	user := &tgUser{ID: 5, FirstName: "Ann"}
+	group := tgChat{ID: -1001, Type: "group"}
+	for name, tc := range map[string]struct {
+		text      string
+		addressed bool
+		ok        bool
+		want      string
+	}{
+		"slash text in a group is chatter": {"/reset", false, true, "/reset"},
+		"naming this bot still addresses":  {"/reset@JannyBot now", true, true, "/reset now"},
+		"another bot's command is ignored": {"/reset@OtherBot", false, false, ""},
+	} {
+		in, ok := c.convert(&tgMessage{From: user, Chat: group, Text: tc.text})
+		if ok != tc.ok || (ok && (in.Addressed != tc.addressed || in.Text != tc.want)) {
+			t.Errorf("%s: ok=%v addressed=%v text=%q", name, ok, in.Addressed, in.Text)
+		}
+	}
+	in, _ := c.convert(&tgMessage{From: user, Chat: tgChat{ID: 5, Type: "private"}, Text: "/reset"})
+	if !in.Addressed || in.Text != "/reset" {
+		t.Errorf("private: %+v", in)
+	}
+}
+
 func TestConvert(t *testing.T) {
 	c := newChannel("http://unused")
 	user := &tgUser{ID: 5, FirstName: "Ann", LastName: "Lee"}

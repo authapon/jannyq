@@ -190,6 +190,9 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	rt := router.New(router.Config{
 		AllowedUsers:   cfg.AllowedUsers,
 		GroupReply:     cfg.GroupReply,
+		NoCommands:     !cfg.Commands,
+		BotName:        cfg.BotName,
+		NoIntro:        !cfg.Intro,
 		GroupContext:   cfg.GroupContext,
 		CompactAfter:   cfg.CompactAfter,
 		RateLimit:      cfg.RateLimit,
@@ -247,6 +250,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 			Attachments:        att != nil,
 			MaxUploadBytes:     int64(min(cfg.WebMaxUploadMB, cfg.AttachMaxMB)) << 20,
 			MaxFiles:           cfg.WebMaxFiles,
+			NoCommands:         !cfg.Commands,
 		}, srv, log)
 		if err != nil {
 			return err
@@ -259,18 +263,18 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	if cfg.TelegramToken != "" {
 		channels = append(channels, telegram.New(telegram.Config{
 			Token:   cfg.TelegramToken,
-			APIBase: cfg.TelegramAPI,
+			APIBase: cfg.TelegramAPI, NoCommands: !cfg.Commands,
 		}, log))
 	}
 	if cfg.DiscordToken != "" {
 		channels = append(channels, discord.New(discord.Config{
-			Token: cfg.DiscordToken, APIBase: cfg.DiscordAPI, GatewayURL: cfg.DiscordGW, Version: version,
+			Token: cfg.DiscordToken, APIBase: cfg.DiscordAPI, GatewayURL: cfg.DiscordGW, Version: version, NoCommands: !cfg.Commands,
 		}, log))
 	}
 	if cfg.LineSecret != "" {
 		lc, err := line.New(line.Config{
 			ChannelSecret: cfg.LineSecret, ChannelToken: cfg.LineToken, WebhookPath: cfg.LinePath,
-			APIBase: cfg.LineAPI, DataAPIBase: cfg.LineDataAPI,
+			APIBase: cfg.LineAPI, DataAPIBase: cfg.LineDataAPI, NoCommands: !cfg.Commands,
 		}, srv, log)
 		if err != nil {
 			return err

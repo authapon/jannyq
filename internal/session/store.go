@@ -325,6 +325,27 @@ func (s *Session) SetMeta(ctx context.Context, key, value string) error {
 	return err
 }
 
+// metaIntroduced marks a chat in which the bot has introduced itself. A reset
+// keeps it: a person who clears the conversation has met the bot already.
+const metaIntroduced = "introduced"
+
+// FirstReply reports whether this is the first time the bot answers in the
+// chat, and notes that it has. It is true once per chat, even when several
+// messages arrive together. A chat that already holds answers (one that
+// existed before introductions did) is marked without being introduced to.
+func (s *Session) FirstReply(ctx context.Context) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO meta(key, value) VALUES (?, '1')`, metaIntroduced)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	var answered bool
+	err = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE role = 'assistant' AND content != '')`).Scan(&answered)
+	return !answered, err
+}
+
 // IsGroup reports whether the chat is a group (several people talk to the bot).
 func (s *Session) IsGroup(ctx context.Context) bool {
 	v, _ := s.Meta(ctx, metaGroup)

@@ -62,6 +62,8 @@ func attachNote(err error) string {
 		return "the file is too large"
 	case errors.Is(err, attach.ErrUnsupported):
 		return "unsupported type of file"
+	case errors.Is(err, attach.ErrNotText):
+		return "named like a text file but it is binary data or in an unknown encoding"
 	case errors.Is(err, attach.ErrEncrypted):
 		return "the PDF is password protected"
 	case errors.Is(err, attach.ErrTooManyPages):
@@ -85,6 +87,8 @@ func (r *Router) userReason(err error) string {
 		return r.tr.T("attach_err_image_too_big")
 	case errors.Is(err, attach.ErrUnsupported):
 		return r.tr.T("attach_err_unsupported")
+	case errors.Is(err, attach.ErrNotText):
+		return r.tr.T("attach_err_not_text")
 	case errors.Is(err, attach.ErrEncrypted):
 		return r.tr.T("attach_err_encrypted")
 	case errors.Is(err, attach.ErrTooManyPages):

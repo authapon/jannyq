@@ -75,7 +75,9 @@ type Config struct {
 	// Attachments lets visitors send files with a message. MaxUploadBytes
 	// limits one file (default 10 MiB) and MaxFiles their number per message
 	// (default 4).
-	Attachments    bool
+	Attachments bool
+	// NoCommands hides the "New chat" button, which sends /reset.
+	NoCommands     bool
 	MaxUploadBytes int64
 	MaxFiles       int
 }
@@ -279,6 +281,7 @@ func (c *Channel) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"authed":     authed,
 		"strings":    c.cfg.Strings,
 
+		"commands":     !c.cfg.NoCommands,
 		"attachments":  c.cfg.Attachments,
 		"maxFiles":     c.cfg.MaxFiles,
 		"maxFileBytes": c.cfg.MaxUploadBytes,

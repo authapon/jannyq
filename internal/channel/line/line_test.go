@@ -617,3 +617,15 @@ func TestUTF16Cut(t *testing.T) {
 		}
 	}
 }
+
+func TestNoCommandsDoNotAddressTheBot(t *testing.T) {
+	c := &Channel{cfg: Config{NoCommands: true}}
+	var ev event
+	ev.Type = "message"
+	ev.Source.Type, ev.Source.GroupID, ev.Source.UserID = "group", "G1", "U1"
+	ev.Message.Type, ev.Message.Text = "text", "/reset"
+	in, _, ok := c.convert(ev, time.Now())
+	if !ok || in.Addressed || in.Text != "/reset" {
+		t.Errorf("ok=%v %+v", ok, in)
+	}
+}

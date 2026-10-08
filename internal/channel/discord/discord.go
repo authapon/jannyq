@@ -43,6 +43,8 @@ type Config struct {
 	Client     *http.Client
 	// Version appears in the User-Agent.
 	Version string
+	// NoCommands leaves "!reset" and "/reset" as ordinary text.
+	NoCommands bool
 }
 
 // Channel is the Discord adapter.
@@ -423,7 +425,7 @@ func (c *Channel) convert(m *message) (channel.Incoming, bool) {
 		text = strings.NewReplacer(raw1, name, raw2, name).Replace(text)
 	}
 	text = strings.TrimSpace(text)
-	if strings.HasPrefix(text, "!") {
+	if strings.HasPrefix(text, "!") && !c.cfg.NoCommands {
 		fields := strings.Fields(text[1:])
 		if len(fields) > 0 && commands[strings.ToLower(fields[0])] {
 			text = "/" + strings.ToLower(fields[0]) + " " + strings.Join(fields[1:], " ")
@@ -431,7 +433,7 @@ func (c *Channel) convert(m *message) (channel.Incoming, bool) {
 			addressed = true
 		}
 	}
-	if strings.HasPrefix(text, "/") && isGroup {
+	if strings.HasPrefix(text, "/") && isGroup && !c.cfg.NoCommands {
 		addressed = addressed || isCommandText(text)
 	}
 

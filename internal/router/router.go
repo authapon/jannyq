@@ -44,9 +44,16 @@ type Config struct {
 	GroupContext string
 	// CompactAfter is the message count above which a chat that only collects
 	// messages is summarised in the background; 0 disables that.
-	CompactAfter   int
-	AllowedUsers   []string // "id" or "channel:id"; empty allows everyone
-	GroupReply     string
+	CompactAfter int
+	AllowedUsers []string // "id" or "channel:id"; empty allows everyone
+	GroupReply   string
+	// NoCommands turns the chat commands off: "/reset" and friends are
+	// ordinary text for the model.
+	NoCommands bool
+	// BotName is how the bot introduces itself; NoIntro turns the greeting
+	// that opens the first conversation with a chat off.
+	BotName        string
+	NoIntro        bool
 	RateLimit      int // messages per user per minute; 0 = unlimited
 	MaxConcurrent  int // simultaneous model runs
 	RequestTimeout time.Duration
@@ -164,7 +171,7 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 		return
 	}
 
-	if cmd, ok := parseCommand(text); ok && !hasFiles {
+	if cmd, ok := parseCommand(text); ok && !hasFiles && !r.cfg.NoCommands {
 		// A reset forgets what was said up to now, not what is said while it waits
 		// for its turn: note where "now" is before letting later messages in.
 		var upTo int64
@@ -181,6 +188,8 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 			return
 		}
 	}
+
+	r.introduce(ctx, in)
 
 	// Store the message now, in the order it arrived, without waiting for a
 	// request of this chat that may still be running.
@@ -215,6 +224,36 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 		r.log.Error("session error", "channel", in.Channel, "chat", in.ChatID, "err", err)
 		r.say(ctx, in, r.tr.T("error_generic"))
 	}
+}
+
+// introduce greets a chat the first time the bot is about to answer in it,
+// in the configured language.
+func (r *Router) introduce(ctx context.Context, in channel.Incoming) {
+	if r.cfg.NoIntro {
+		return
+	}
+	var first bool
+	err := r.sessions.Record(in.Channel, in.ChatID, func(s *session.Session) error {
+		var err error
+		first, err = s.FirstReply(ctx)
+		return err
+	})
+	if err != nil {
+		r.log.Warn("could not check whether the chat has been greeted", "channel", in.Channel, "chat", in.ChatID, "err", err)
+		return
+	}
+	if !first {
+		return
+	}
+	key := "intro"
+	if r.cfg.NoCommands {
+		key = "intro_nocmd"
+	}
+	name := r.cfg.BotName
+	if name == "" {
+		name = "Jannyq"
+	}
+	r.say(ctx, in, r.tr.T(key, name))
 }
 
 // store saves an incoming message and returns its id.

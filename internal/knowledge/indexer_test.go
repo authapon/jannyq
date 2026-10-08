@@ -3,6 +3,7 @@ package knowledge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"log/slog"
@@ -525,4 +526,27 @@ func TestIndexerMetrics(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("the scan was not counted:\n%s", reg.Render())
+}
+
+// Course notes in Thai are long files whose first 8 KB may end inside a character.
+func TestLongThaiMarkdownIsIndexedAndBinaryDataGetsAClearReason(t *testing.T) {
+	r := newRig(t, false)
+	line := "การตั้งค่าระบบปฏิบัติการและเครื่องมือสำหรับนักพัฒนา\n"
+	for i := 0; i < 8; i++ {
+		r.write(fmt.Sprintf("course/OS%d.md", i), strings.Repeat("a", i)+"# บทที่\n"+strings.Repeat(line, 300))
+	}
+	r.write("course/broken.md", "# title\n\x00\x01\x02 binary \xff\xfe data")
+	res := r.scan()
+	if res.Added != 8 || res.Failed != 1 {
+		t.Fatalf("%+v", res)
+	}
+	files, _ := r.kb.Store.Files(bg)
+	for _, f := range files {
+		if f.Path == "course/broken.md" && !strings.Contains(f.Error, "not readable text") {
+			t.Errorf("reason = %q", f.Error)
+		}
+		if strings.HasPrefix(f.Path, "course/OS") && f.Status != "ok" {
+			t.Errorf("%s: %s", f.Path, f.Error)
+		}
+	}
 }

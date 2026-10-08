@@ -121,6 +121,8 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--cli` | `false` | enable the terminal channel |
 | `--allowed-users` | everyone | comma-separated user IDs or `channel:id` |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
+| `--intro` | `true` | the first time the bot answers in a chat it introduces itself (in `--lang`, with `--bot-name`); `false` skips that |
+| `--commands` | `true` | chat commands `/help`, `/reset`, `/compact`; `false` removes **all** slash commands: such text is just a message for the model, and the web chat hides its **New chat** button |
 | `--rate-limit` | `20` | messages per user per minute |
 | `--system-prompt[-file]` | – | extra instructions for the model |
 | `--fetch-allow-private` | `false` | let `web_fetch` reach private addresses (**disables SSRF protection**) |
@@ -137,7 +139,9 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 
 - In groups the bot answers when it is **@mentioned**, when someone **replies to its message**, or on a
   `/command`. With BotFather's privacy mode on (default) it only receives those messages anyway.
-- Commands: `/help`, `/reset` (forget this chat), `/compact` (summarise older messages now).
+- Commands: `/help`, `/reset` (forget this chat), `/compact` (summarise older messages now). Start the bot with
+  `JANNYQ_COMMANDS=false` to have none: chats are then only ever cleared by the operator (retention, deleting the folder);
+  automatic compaction still happens.
 - Replies are plain text for now (no Markdown rendering).
 
 ### Discord notes

@@ -56,6 +56,8 @@ type Config struct {
 	Client        *http.Client
 	// MaxInFlight bounds the messages being handled at once (default 64).
 	MaxInFlight int
+	// NoCommands stops "/reset" and friends from counting as addressed.
+	NoCommands bool
 }
 
 // Channel is the LINE adapter.
@@ -302,7 +304,7 @@ func (c *Channel) convert(ev event, received time.Time) (in channel.Incoming, na
 			}
 		}
 		in.Text = strings.TrimSpace(text)
-		if isCommand(in.Text) {
+		if !c.cfg.NoCommands && isCommand(in.Text) {
 			in.Addressed = true
 		}
 	case "image":

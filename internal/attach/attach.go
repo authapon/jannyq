@@ -25,6 +25,7 @@ var (
 	ErrImageTooBig  = errors.New("attach: the picture has too many pixels")
 	ErrTooLarge     = errors.New("attach: the file is too large")
 	ErrUnsupported  = errors.New("attach: this kind of file is not supported")
+	ErrNotText      = errors.New("attach: the file is named like a text file but holds binary data or an unknown encoding")
 	ErrEncrypted    = errors.New("attach: the document is password protected")
 	ErrTooManyPages = errors.New("attach: the document has too many pages")
 	ErrVisionOff    = errors.New("attach: the model cannot look at pictures")
@@ -186,6 +187,9 @@ func (p *Processor) Process(ctx context.Context, workspace string, in Input) (*R
 	}
 	kind, mime := sniff(in.Name, in.MIME, in.Data)
 	if kind == "" {
+		if claimsText(in.Name, in.MIME) {
+			return nil, ErrNotText
+		}
 		return nil, ErrUnsupported
 	}
 	select {

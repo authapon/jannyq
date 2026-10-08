@@ -215,3 +215,43 @@ func TestPersistence(t *testing.T) {
 		t.Errorf("%+v", h)
 	}
 }
+
+func TestFilesThatFailedUnderVersionOneAreReadAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kb.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Replace(bg, File{Path: "bad.md", Size: 100, MtimeNS: 5, Status: "error", Error: "unsupported type of file"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	put(t, s, "good.md", []string{"a perfectly fine passage"}, nil)
+	if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil { // as a database made by the earlier version
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	files, _ := s.Files(bg)
+	for _, f := range files {
+		switch f.Path {
+		case "bad.md":
+			if f.Size != -1 {
+				t.Errorf("a failed file will not be retried: size %d", f.Size)
+			}
+		case "good.md":
+			if f.Size != 1 {
+				t.Errorf("a good file was touched: size %d", f.Size)
+			}
+		}
+	}
+	// and the migration happens once only
+	s.Close()
+	s, _ = Open(path)
+	if fs, _ := s.Files(bg); fs[0].Size != -1 || fs[1].Size != 1 {
+		t.Errorf("%+v", fs)
+	}
+}

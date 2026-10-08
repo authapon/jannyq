@@ -518,3 +518,16 @@ func TestMessagesOfAChatKeepTheirOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestNoCommandsLeavesBangAndSlashTextAlone(t *testing.T) {
+	c := New(Config{Token: "t", NoCommands: true}, nil)
+	for _, text := range []string{"!reset", "!help", "/compact"} {
+		in, ok := c.convert(&message{
+			ID: "1", ChannelID: "c1", GuildID: "g1", Content: text,
+			Author: user{ID: "u1", Username: "ann"},
+		})
+		if !ok || in.Text != text || in.Addressed {
+			t.Errorf("%q: ok=%v text=%q addressed=%v", text, ok, in.Text, in.Addressed)
+		}
+	}
+}

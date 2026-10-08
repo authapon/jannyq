@@ -29,6 +29,8 @@ type Config struct {
 	APIBase     string        // default https://api.telegram.org
 	PollTimeout time.Duration // long-poll duration, default 30s
 	Client      *http.Client  // optional
+	// NoCommands stops "/…" text from counting as addressed to the bot.
+	NoCommands bool
 }
 
 // Channel is the Telegram adapter.
@@ -448,8 +450,11 @@ func (c *Channel) convert(m *tgMessage) (channel.Incoming, bool) {
 				return channel.Incoming{}, false // command for another bot
 			}
 			text = strings.TrimSpace(cmd[:at] + " " + strings.Join(fields[1:], " "))
+			addressed = true // it names this bot
 		}
-		addressed = true
+		if !c.cfg.NoCommands {
+			addressed = true
+		}
 	}
 	if c.botUser != "" {
 		re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(c.botUser) + `\b`)

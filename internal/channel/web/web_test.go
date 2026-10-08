@@ -796,3 +796,16 @@ func TestMessagesFromOneVisitorAreAcceptedInTheOrderTheyWereSent(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigTellsTheClientWhetherCommandsExist(t *testing.T) {
+	h := newHarness(t, nil)
+	h.start()
+	if _, m := h.json("GET", "/api/config", "", nil); m["commands"] != true {
+		t.Errorf("commands = %v, want true", m["commands"])
+	}
+	h = newHarness(t, func(c *Config) { c.NoCommands = true })
+	h.start()
+	if _, m := h.json("GET", "/api/config", "", nil); m["commands"] != false {
+		t.Errorf("commands = %v, want false", m["commands"])
+	}
+}

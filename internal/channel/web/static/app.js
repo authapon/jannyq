@@ -177,7 +177,7 @@
   async function showChat() {
     $('login').hidden = true;
     $('chat').hidden = false;
-    $('reset').hidden = false;
+    $('reset').hidden = cfg.commands === false;
     const res = await api('GET', 'api/history');
     if (res.ok && res.data && Array.isArray(res.data.messages)) {
       for (const m of res.data.messages) addMessage(m.role === 'user' ? 'user' : 'bot', m.text, m.attachments);
