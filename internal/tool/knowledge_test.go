@@ -263,3 +263,42 @@ func TestKnowledgeRead(t *testing.T) {
 		t.Errorf("not capped:\n%s", out)
 	}
 }
+
+func TestSearchShowsTheWholeSectionAroundTheBestHit(t *testing.T) {
+	kb := testKB(t)
+	ctx := context.Background()
+	pad := strings.Repeat("filler text about something else entirely. ", 5)
+	if err := kb.Store.Replace(ctx, knowledge.File{Path: "c.md", Size: 1, MtimeNS: 1, Kind: "text"}, []knowledge.EmbeddedChunk{
+		{Chunk: knowledge.Chunk{Text: "## Chapter 1\n1.4 Philosophy\n" + pad}},
+		{Chunk: knowledge.Chunk{Text: "## Chapter 1\n1.5.3 Learning outcomes (PLOs)\nPLO1 maths. PLO2 economics. PLO3 programs. PLO4 systems."}},
+		{Chunk: knowledge.Chunk{Text: "PLO5 analysis. PLO6 communication. PLO7 research. PLO8 ethics."}},
+		{Chunk: knowledge.Chunk{Text: "PLO9 work placement.\n1.6 Details of outcomes\n" + pad}},
+		{Chunk: knowledge.Chunk{Text: "1.7 Other things\n" + pad}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	k := &KnowledgeSearch{KB: kb}
+	// the best hit is the tail of the list: its start comes before it, and the section is closed at 1.6
+	out, err := k.Execute(ctx, CallContext{}, []byte(`{"query":"PLO7 research","max_results":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"[1] c.md (passage 3 of 5)",
+		"[1, before] c.md (passage 2 of 5)", "PLO1 maths",
+		"[1, continued] c.md (passage 4 of 5)", "PLO9 work placement",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "1.7 Other things") || strings.Contains(out, "Philosophy") {
+		t.Errorf("text of other sections was added:\n%s", out)
+	}
+	// switched off, only the hit is shown
+	off := &KnowledgeSearch{KB: kb, ExpandChars: -1}
+	out, _ = off.Execute(ctx, CallContext{}, []byte(`{"query":"PLO7 research","max_results":1}`))
+	if strings.Contains(out, "before]") || strings.Contains(out, "continued]") || strings.Contains(out, "PLO9") {
+		t.Errorf("expansion is off:\n%s", out)
+	}
+}

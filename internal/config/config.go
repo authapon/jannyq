@@ -104,22 +104,23 @@ type Config struct {
 	WebMaxFiles       int
 
 	// Knowledge base
-	KnowledgeDir        string
-	KnowledgeDB         string
-	EmbedModel          string
-	EmbedProvider       string
-	EmbedBaseURL        string
-	EmbedAPIKey         string
-	KnowledgeInterval   time.Duration
-	KnowledgeSync       bool
-	KnowledgePrefetch   string
-	KnowledgeChunkChars int
-	KnowledgeOverlap    int
-	KnowledgeResults    int
-	KnowledgeMinSim     float64
-	KnowledgeMaxFileMB  int
-	KnowledgePDFPages   int
-	KnowledgeOCRPages   int
+	KnowledgeDir         string
+	KnowledgeDB          string
+	EmbedModel           string
+	EmbedProvider        string
+	EmbedBaseURL         string
+	EmbedAPIKey          string
+	KnowledgeInterval    time.Duration
+	KnowledgeSync        bool
+	KnowledgePrefetch    string
+	KnowledgeExpandChars int
+	KnowledgeChunkChars  int
+	KnowledgeOverlap     int
+	KnowledgeResults     int
+	KnowledgeMinSim      float64
+	KnowledgeMaxFileMB   int
+	KnowledgePDFPages    int
+	KnowledgeOCRPages    int
 
 	// Operations
 	MetricsListen  string
@@ -371,6 +372,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.integer(&c.KnowledgeChunkChars, "knowledge-chunk-chars", 1200, "size of a knowledge passage in characters")
 	l.integer(&c.KnowledgeOverlap, "knowledge-overlap", 150, "characters shared by neighbouring passages")
 	l.str(&c.KnowledgePrefetch, "knowledge-prefetch", "auto", "look up the knowledge base for each message before the model answers: auto (only when the model cannot call tools), always, off")
+	l.integer(&c.KnowledgeExpandChars, "knowledge-expand-chars", 3000, "text of the same section added around each of the two best passages, so that a list cut by a passage boundary comes whole (0 = off)")
 	l.integer(&c.KnowledgeResults, "knowledge-results", 5, "passages returned by a knowledge search")
 	l.float(&c.KnowledgeMinSim, "knowledge-min-similarity", 0.25, "least cosine similarity for a semantic match (0-1)")
 	l.integer(&c.KnowledgeMaxFileMB, "knowledge-max-file-mb", 50, "largest knowledge file in MB; larger files are skipped")
@@ -632,6 +634,9 @@ func (c *Config) validate() error {
 		}
 		if c.KnowledgePrefetch != "auto" && c.KnowledgePrefetch != "always" && c.KnowledgePrefetch != "off" {
 			bad("--knowledge-prefetch must be auto, always or off")
+		}
+		if c.KnowledgeExpandChars < 0 || c.KnowledgeExpandChars > 50000 {
+			bad("--knowledge-expand-chars must be between 0 and 50000")
 		}
 		if c.KnowledgeResults < 1 || c.KnowledgeResults > 10 {
 			bad("--knowledge-results must be between 1 and 10")

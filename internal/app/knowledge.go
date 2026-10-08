@@ -141,7 +141,11 @@ func (k *knowledgeBase) syncAtStart(ctx context.Context, log *slog.Logger) error
 
 // register adds the knowledge tools.
 func (k *knowledgeBase) register(tools *tool.Registry, cfg *config.Config) {
-	tools.Register(&tool.KnowledgeSearch{KB: k.kb, Indexer: k.ix, DefaultResults: cfg.KnowledgeResults})
+	expand := cfg.KnowledgeExpandChars
+	if expand == 0 {
+		expand = -1 // off
+	}
+	tools.Register(&tool.KnowledgeSearch{KB: k.kb, Indexer: k.ix, DefaultResults: cfg.KnowledgeResults, ExpandChars: expand})
 	tools.Register(&tool.KnowledgeFiles{KB: k.kb})
 	tools.Register(&tool.KnowledgeRead{KB: k.kb})
 }

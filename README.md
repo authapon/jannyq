@@ -380,12 +380,15 @@ Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask ab
   (reciprocal rank fusion) and vector matches below `--knowledge-min-similarity` are dropped. Without an embedding model — or while
   it is unreachable — search works by words only, and the answer says so. Good choices for Ollama: `bge-m3` (multilingual, Thai included)
   or the smaller `nomic-embed-text`. Changing `--embed-model` re-embeds the stored passages without re-reading the files.
-- **Lists and sections that run across two passages**: documents are cut into passages of about `--knowledge-chunk-chars` (1200)
-  characters, so a list can end up half in one passage and half in the next (a curriculum's nine learning outcomes, say, with the model
-  answering with the first five). Search results therefore say where each passage sits (`passage 44 of 487`) and the **passage that
-  follows each of the two best hits is added automatically** (`[1, continued]`). The model also has `knowledge_read` to read a document
-  on from any passage number, and is told to do so whenever a list or table is still cut off. A larger `--knowledge-chunk-chars`
-  (say 2000) makes such splits rarer at the cost of less precise matches.
+- **Lists and sections that run across passages**: documents are cut into passages of about `--knowledge-chunk-chars` (1200) characters, so a
+  list can end up half in one passage and half in the next (a curriculum's nine learning outcomes, say, with the model answering with the
+  first five). Search results therefore say where each passage sits (`passage 44 of 487`), and **for the two best hits the rest of
+  their section is added automatically**: the passages back to where the section opens (`[1, before]`) and on to where the next section
+  of the same or a higher rank begins (`[1, continued]`). Sections are found from the headings in the text: Markdown `#` headings and
+  numbered ones such as `1.5.3 Learning outcomes` or `2.1) Admission` (at least two levels, so list items like `1.` or `2)` are not headings).
+  This reads the stored passages, so existing indexes work without being rebuilt. At most `--knowledge-expand-chars` (3000, `0` = off)
+  characters are added per hit, and a text without headings gets just the next passage. When a section is longer than that, the model
+  has `knowledge_read` to read on from any passage number, and is told to do so when a list or table is still cut off.
 - **How the model is made to use it**: the system prompt lists the documents (file name plus the first lines of each, as a title) and
   tells the model to call `knowledge_search` *first* for anything those documents could cover, or for terms it does not recognise. A
   model told only "there is a knowledge base" often answers from memory instead. Some models cannot call tools at all (the log says
