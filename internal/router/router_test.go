@@ -1210,3 +1210,64 @@ func TestFirstStartWithoutCommandsGetsTheIntroductionOnly(t *testing.T) {
 		t.Errorf("intro off: %q", got)
 	}
 }
+
+// syncBuffer is a log destination safe for concurrent use.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+func TestConsoleLogShowsActivityButNeverMessageText(t *testing.T) {
+	var buf syncBuffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	sm := session.NewManager(t.TempDir(), 8, 4)
+	t.Cleanup(func() { sm.Close() })
+	f := &fakeLLM{reply: func(llm.Request) (*llm.Response, error) {
+		return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: "the-answer-is-confidential"}}, nil
+	}}
+	ag := agent.New(agent.Config{Model: "m", Location: time.UTC}, f, nil, log)
+	r := New(Config{RateLimit: 2, Intro: false}, sm, ag, i18n.New("en"), log)
+
+	rec := &recorder{}
+	r.Handle(ctx, msg(rec, "my-secret-question-about-passwords"))
+	r.Handle(ctx, msg(rec, "/help"))
+	r.Handle(ctx, msg(rec, "another-secret-text"))
+	r.Handle(ctx, msg(rec, "third-secret-text")) // over the rate limit
+	g := msg(rec, "private chatter between others")
+	g.ChatID, g.IsGroup, g.Addressed = "grp", true, false
+	r.Handle(ctx, g)
+	r.Wait()
+
+	out := buf.String()
+	for _, want := range []string{
+		`msg="user connected"`, `channel=test`, `user=u1`, `name=Ann`,
+		`msg="message received"`, `chars=34`,
+		`msg=command command=help`,
+		`msg=reply`, `result=ok`, `delivered=true`,
+		`msg="message refused: rate limit"`,
+		`msg="model request"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log lacks %q:\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, `msg="user connected"`); n != 1 {
+		t.Errorf("%d \"user connected\" lines for one user", n)
+	}
+	for _, secret := range []string{"my-secret-question", "another-secret", "third-secret", "the-answer-is-confidential", "private chatter"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("message text %q was written to the log:\n%s", secret, out)
+		}
+	}
+	// chatter that was only kept as context is a debug line, not an info line
+	if !strings.Contains(out, "level=DEBUG msg=\"message received\" channel=test chat=grp") {
+		t.Errorf("group chatter should be logged at debug level:\n%s", out)
+	}
+}

@@ -311,6 +311,11 @@ jannyq --allowed-users telegram:123456789 --allowed-groups telegram:-10012345678
   `--knowledge-min-similarity` ถ้าไม่มี embedding model หรือเข้าถึงไม่ได้ในขณะนั้น จะค้นด้วยคำอย่างเดียวและบอกในคำตอบ
   Ollama แนะนำ `bge-m3` (หลายภาษา รวมไทย) หรือ `nomic-embed-text` (เล็กกว่า) การเปลี่ยน `--embed-model` จะ embed ข้อความที่เก็บไว้ใหม่
   โดยไม่ต้องอ่านไฟล์ซ้ำ
+- **ทำให้โมเดลใช้ฐานความรู้อย่างไร**: system prompt จะแสดงรายการเอกสาร (ชื่อไฟล์และบรรทัดแรก ๆ ของไฟล์เป็นชื่อเรื่อง) และสั่งให้โมเดลเรียก
+  `knowledge_search` **ก่อน** สำหรับเรื่องที่เอกสารเหล่านั้นอาจครอบคลุม หรือคำที่ไม่รู้จัก โมเดลที่ถูกบอกแค่ว่า "มีฐานความรู้" มักตอบจากความจำแทน
+  บางโมเดลเรียก tool ไม่ได้เลย (log ขึ้น `model does not support tools`) สำหรับโมเดลเหล่านี้ `--knowledge-prefetch auto` (ค่าเริ่มต้น) จะค้นฐานความรู้
+  ให้ด้วยข้อความของผู้ใช้แล้วใส่ผลลัพธ์ไว้หน้าโมเดล `always` ทำให้ทุกข้อความแม้โมเดลเรียก tool ได้ (เชื่อถือได้กว่าสำหรับโมเดลเล็ก แต่ค้นทุกข้อความและอาจมีข้อความที่ไม่เกี่ยวข้อง)
+  `off` คือไม่ทำเลย ถ้าบอทยังตอบจากความจำ: ใช้โมเดลที่รองรับ tool, ตั้ง `--knowledge-prefetch always` และเพิ่มโมเดล embedding (`--embed-model`)
 - **สร้างให้เสร็จก่อนบอทเริ่มทำงาน**: ตอนเริ่มโปรแกรม ระบบตรวจทั้งโฟลเดอร์และสร้าง/ปรับปรุงดัชนีให้เสร็จก่อน (อ่านไฟล์ใหม่และไฟล์ที่แก้ ลืมไฟล์ที่ลบ
   ทำ embedding และรอไฟล์ที่ยังคัดลอกไม่เสร็จ) แล้วจึงเริ่ม channel และเว็บเซิร์ฟเวอร์ log จะแสดง `still building the knowledge base` ทุก 15 วินาที
   โฟลเดอร์ใหญ่ที่ต้อง OCR อาจใช้เวลานาน ถ้าไม่ต้องการรอ ตั้ง `JANNYQ_KNOWLEDGE_STARTUP_SYNC=false` เพื่อให้สร้างเบื้องหลังขณะที่บอทตอบได้จากส่วนที่ทำเสร็จแล้ว
@@ -333,6 +338,20 @@ jannyq --allowed-users telegram:123456789 --allowed-groups telegram:-10012345678
 เช็กลิสต์ก่อนเปิดสาธารณะ, monitoring, backup และการซ้อมกู้ข้อมูล, การอัปเกรด, การเก็บข้อมูล และตัวอย่าง systemd
 เครื่องมือที่เกี่ยวข้อง: **metrics** แบบ Prometheus (`--metrics-listen`, `--metrics-token`), `/healthz` และ `/readyz`,
 **backup** (`--backup-dir` และคำสั่ง `jannyq backup`, `jannyq verify`, `jannyq restore --from FILE [--force]`) และ **retention** (`--retention-days`)
+
+**log บน console** (`--log-level info` เป็นค่าเริ่มต้น, `--log-json` สำหรับ JSON) แสดงว่าบอททำอะไรอยู่ แต่ไม่แสดงสิ่งที่ผู้ใช้พิมพ์:
+
+```
+level=INFO msg="user connected" channel=telegram user=123456789 name="Ann Lee" chat=123456789 group=false
+level=INFO msg="message received" channel=telegram chat=123456789 user=123456789 group=false addressed=true chars=34 files=0
+level=INFO msg="tool call" tool=knowledge_search chat=telegram:123456789 user=123456789 duration=41ms bytes=5230
+level=INFO msg=reply channel=telegram chat=123456789 user=123456789 result=ok delivered=true chars=412 took=8.2s
+```
+
+*user connected* คือข้อความแรกของผู้ใช้คนนั้นนับตั้งแต่เริ่มบอท (web chat: ผู้เข้าชมเปิดหน้าเว็บ แสดงด้วย hash สั้น ๆ แทน ID: `web visitor connected`,
+`web chat opened`/`closed`) log ยังแสดงข้อความที่ถูกปฏิเสธ (`message from user that is not allowed`, `message refused: rate limit`, `webhook refused: bad signature`),
+คำสั่ง, การแนะนำตัว, tool call, การทำดัชนี, backup, การเริ่ม/หยุด channel และการปิดโปรแกรม โดย **ไม่** บันทึกข้อความ คำตอบ หรืออาร์กิวเมนต์ของ tool
+ข้อความในกลุ่มที่เก็บเป็นบริบทอย่างเดียวและทุกคำขอไปยังโมเดล (จำนวน token, เวลา) จะเห็นที่ `--log-level debug`
 
 ## Web chat
 

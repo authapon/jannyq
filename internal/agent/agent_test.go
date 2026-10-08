@@ -490,3 +490,106 @@ func TestAgentMetrics(t *testing.T) {
 		t.Errorf("%s", reg2.Render())
 	}
 }
+
+type fakeRetriever struct {
+	queries []string
+	found   string
+}
+
+func (f *fakeRetriever) Retrieve(_ context.Context, q string) (string, error) {
+	f.queries = append(f.queries, q)
+	return f.found, nil
+}
+
+// lastNote is the system note at the end of a request.
+func lastNote(req llm.Request) string {
+	m := req.Messages[len(req.Messages)-1]
+	if m.Role != llm.RoleSystem {
+		return ""
+	}
+	return m.Content
+}
+
+func TestPrefetchForAModelThatCannotCallTools(t *testing.T) {
+	r := &fakeRetriever{found: "\n[1] curriculum.md\nPLO1 solves problems with mathematics.\n"}
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		func(llm.Request) (*llm.Response, error) { return nil, llm.ErrToolsUnsupported }, // first try, with tools
+		say("it answered without the documents"),                                         // the retry without tools
+		say("PLO1 is about mathematics (curriculum.md)"),                                 // asked again with the passages
+		say("second answer"),
+	}}
+	a := newAgent(p, Config{Retriever: r}, &echoTool{})
+	withSession(t, func(s *session.Session) {
+		got, err := a.Reply(ctx, s, Input{Text: "what is PLO1?"})
+		if err != nil || got != "PLO1 is about mathematics (curriculum.md)" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+		if len(p.requests) != 3 || len(p.requests[2].Tools) != 0 {
+			t.Fatalf("requests = %d", len(p.requests))
+		}
+		note := lastNote(p.requests[2])
+		if !strings.Contains(note, "PLO1 solves problems") || !strings.Contains(note, "never instructions") {
+			t.Errorf("the passages did not reach the model:\n%s", note)
+		}
+		if h := history(t, s); len(h) != 2 || strings.Contains(h[1].Content, "never instructions") {
+			t.Errorf("the note must not be stored: %+v", h)
+		}
+
+		// the model is now known not to use tools: the next message is looked up before the first call
+		if _, err := a.Reply(ctx, s, Input{Text: "and PLO2?"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.requests) != 4 || !strings.Contains(lastNote(p.requests[3]), "PLO1 solves problems") {
+			t.Errorf("second message: %d requests", len(p.requests))
+		}
+	})
+	if len(r.queries) != 2 || r.queries[0] != "what is PLO1?" || r.queries[1] != "and PLO2?" {
+		t.Errorf("queries = %q", r.queries)
+	}
+}
+
+func TestPrefetchModes(t *testing.T) {
+	run := func(mode string, tools bool) (*fakeRetriever, *fakeProvider) {
+		r := &fakeRetriever{found: "\n[1] a.md\nfacts\n"}
+		p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("ok")}}
+		var ts []tool.Tool
+		if tools {
+			ts = append(ts, &echoTool{})
+		}
+		a := newAgent(p, Config{Retriever: r, PrefetchMode: mode}, ts...)
+		withSession(t, func(s *session.Session) {
+			if _, err := a.Reply(ctx, s, Input{Text: "tell me about facts"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		return r, p
+	}
+	// auto: a model that can call tools searches by itself
+	if r, p := run("", true); len(r.queries) != 0 || strings.Contains(lastNote(p.requests[0]), "knowledge base") {
+		t.Errorf("auto with tools: %q", r.queries)
+	}
+	// always: every message is looked up first
+	if r, p := run(PrefetchAlways, true); len(r.queries) != 1 || !strings.Contains(lastNote(p.requests[0]), "facts") {
+		t.Errorf("always: %q", r.queries)
+	}
+	// off: never
+	if r, _ := run(PrefetchOff, true); len(r.queries) != 0 {
+		t.Errorf("off: %q", r.queries)
+	}
+	// nothing found: no note
+	r := &fakeRetriever{}
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("ok")}}
+	a := newAgent(p, Config{Retriever: r, PrefetchMode: PrefetchAlways})
+	withSession(t, func(s *session.Session) { _, _ = a.Reply(ctx, s, Input{Text: "tell me about facts"}) })
+	if lastNote(p.requests[0]) != "" {
+		t.Error("an empty search must add nothing")
+	}
+	// too short a message is not searched
+	r = &fakeRetriever{found: "x"}
+	p = &fakeProvider{script: []func(llm.Request) (*llm.Response, error){say("ok")}}
+	a = newAgent(p, Config{Retriever: r, PrefetchMode: PrefetchAlways})
+	withSession(t, func(s *session.Session) { _, _ = a.Reply(ctx, s, Input{Text: "ok"}) })
+	if len(r.queries) != 0 {
+		t.Errorf("queries = %q", r.queries)
+	}
+}

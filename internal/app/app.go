@@ -171,6 +171,11 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	if skills != nil {
 		acfg.Skills = skills
 	}
+	if t, ok := tools.Get("knowledge_search"); ok {
+		if r, ok := t.(agent.Retriever); ok {
+			acfg.Retriever, acfg.PrefetchMode = r, cfg.KnowledgePrefetch
+		}
+	}
 	att := newAttachments(ctx, cfg, provider, runner, log)
 	if att != nil {
 		tools.Register(tool.ReadAttachment{})
@@ -373,7 +378,11 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			log.Info("channel starting", "channel", ch.Name())
 			err := ch.Run(runCtx, rt.Handle)
+			if runCtx.Err() != nil || err == nil {
+				log.Info("channel stopped", "channel", ch.Name())
+			}
 			if err != nil && runCtx.Err() == nil {
 				errc <- fmt.Errorf("%s channel: %w", ch.Name(), err)
 				return
@@ -390,14 +399,18 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		}()
 	}
 
+	log.Info("ready: waiting for messages", "channels", len(channels))
 	var runErr error
 	select {
 	case runErr = <-errc:
+		log.Error("stopping because of an error", "err", runErr)
 		cancel()
 	case <-runCtx.Done():
+		log.Info("shutting down")
 	}
 	wg.Wait()
 	rt.Wait()
+	log.Info("stopped")
 	if runErr == nil {
 		select {
 		case runErr = <-errc:

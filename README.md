@@ -380,6 +380,13 @@ Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask ab
   (reciprocal rank fusion) and vector matches below `--knowledge-min-similarity` are dropped. Without an embedding model — or while
   it is unreachable — search works by words only, and the answer says so. Good choices for Ollama: `bge-m3` (multilingual, Thai included)
   or the smaller `nomic-embed-text`. Changing `--embed-model` re-embeds the stored passages without re-reading the files.
+- **How the model is made to use it**: the system prompt lists the documents (file name plus the first lines of each, as a title) and
+  tells the model to call `knowledge_search` *first* for anything those documents could cover, or for terms it does not recognise. A
+  model told only "there is a knowledge base" often answers from memory instead. Some models cannot call tools at all (the log says
+  `model does not support tools`); for them `--knowledge-prefetch auto` (default) searches the knowledge base itself with the user's
+  message and puts the passages in front of the model. `always` does that for every message even with tool-capable models (more
+  reliable with small models, costs a search per message and may add unrelated passages), `off` never does. If the bot still answers
+  from memory: use a model that supports tools, set `--knowledge-prefetch always`, and add an embedding model (`--embed-model`).
 - **Built before the bot starts**: at start-up the bot first checks the whole folder and builds or updates the index — reading new and
   changed files, forgetting deleted ones, embedding the passages, waiting for files that are still being copied — and only then starts
   the channels and the web server. The log shows `still building the knowledge base` every 15 s. A big folder with OCR can take a long
@@ -466,6 +473,21 @@ monitoring, backups and restore drills, upgrades, data retention and a systemd v
 - **Backups**: `--backup-dir` (daily, newest `--backup-keep` kept, `--backup-files`), and `jannyq backup`, `jannyq verify FILE`, `jannyq restore --from FILE [--force]`.
   Snapshots are consistent while the bot runs; a restore is checked completely before it touches anything.
 - **Retention**: `--retention-days N` deletes chats (messages and files) idle for N days.
+- **The console log** (`--log-level info` by default, `--log-json` for JSON) shows what the bot is doing, never what people write:
+
+  ```
+  level=INFO msg="ready: waiting for messages" channels=2
+  level=INFO msg="user connected" channel=telegram user=123456789 name="Ann Lee" chat=123456789 group=false
+  level=INFO msg="message received" channel=telegram chat=123456789 user=123456789 group=false addressed=true chars=34 files=0
+  level=INFO msg="tool call" tool=knowledge_search chat=telegram:123456789 user=123456789 duration=41ms bytes=5230
+  level=INFO msg=reply channel=telegram chat=123456789 user=123456789 result=ok delivered=true chars=412 took=8.2s
+  ```
+
+  *user connected* is the first message of a user since the bot started (for the web chat, a visitor opening the page, with a short
+  hash instead of the visitor id: `web visitor connected`, `web chat opened`/`closed`). Messages turned away are logged too
+  (`message from user that is not allowed`, `message refused: rate limit`, `webhook refused: bad signature`), as are commands, the
+  introduction, tool calls, indexing, backups, channel start and stop and shutdown. Texts, answers and tool arguments are not logged.
+  Group messages that are only kept as context appear at `--log-level debug`, together with every model request (tokens, timing).
 
 ## Public deployment (HTTPS)
 

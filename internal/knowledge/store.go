@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -277,6 +278,17 @@ func (s *Store) Chunks(ctx context.Context, fileID int64) ([]StoredChunk, error)
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// Opening returns the beginning of the first passage of a file, or "" when
+// there is none: enough to tell what a document is about.
+func (s *Store) Opening(ctx context.Context, fileID int64) (string, error) {
+	var text string
+	err := s.db.QueryRowContext(ctx, `SELECT text FROM chunks WHERE file_id = ? ORDER BY ord LIMIT 1`, fileID).Scan(&text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return text, err
 }
 
 // SetEmbeddings stores vectors for passages of a file and records the model.

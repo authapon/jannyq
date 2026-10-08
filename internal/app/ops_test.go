@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,13 +133,24 @@ func TestBackupFailureIsCountedAndRetried(t *testing.T) {
 		runBackupsEvery(ctx, cfg, "t", metrics.NewInstruments(reg), reg, quiet(), 5*time.Millisecond, 20*time.Millisecond)
 		close(done)
 	}()
+	// at least two failures: the retry runs every few milliseconds, so the count
+	// may step over any exact number between two looks
+	failures := func() int {
+		var n int
+		for _, line := range strings.Split(reg.Render(), "\n") {
+			if rest, ok := strings.CutPrefix(line, `jannyq_backups_total{result="error"} `); ok {
+				n, _ = strconv.Atoi(rest)
+			}
+		}
+		return n
+	}
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(reg.Render(), `jannyq_backups_total{result="error"} 2`) {
+	for time.Now().Before(deadline) && failures() < 2 {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	<-done
-	if !strings.Contains(reg.Render(), `jannyq_backups_total{result="error"} 2`) {
+	if failures() < 2 {
 		t.Errorf("failures are not retried:\n%s", reg.Render())
 	}
 }

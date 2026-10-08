@@ -9,8 +9,10 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -269,8 +271,9 @@ func (c *Channel) handleConfig(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusTooManyRequests, "too many new chats from this address")
 			return
 		}
-		value, _ := c.signer.issue()
+		value, id := c.signer.issue()
 		c.setCookie(w, r, value)
+		c.log.Info("web visitor connected", "visitor", shortID(id), "client", c.host.ClientKey(r))
 		authed = true
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -316,8 +319,9 @@ func (c *Channel) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusTooManyRequests, "too many new chats from this address")
 		return
 	}
-	value, _ := c.signer.issue()
+	value, id := c.signer.issue()
 	c.setCookie(w, r, value)
+	c.log.Info("web visitor connected", "visitor", shortID(id), "client", ip, "access_code", true)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -502,6 +506,11 @@ func (c *Channel) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
+	opened := time.Now()
+	c.log.Info("web chat opened", "visitor", shortID(id), "client", c.host.ClientKey(r), "resumed", lastID > 0)
+	defer func() {
+		c.log.Info("web chat closed", "visitor", shortID(id), "after", time.Since(opened).Round(time.Second))
+	}()
 
 	rc := http.NewResponseController(w)
 	h := w.Header()
@@ -648,4 +657,11 @@ func (c *Channel) readUpload(w http.ResponseWriter, r *http.Request) (string, []
 		}
 	}
 	return text, files, true
+}
+
+// shortID is a few characters of a visitor's id: enough to follow one visitor
+// through the log without writing down the id itself.
+func shortID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:4])
 }

@@ -102,6 +102,7 @@ func (r *Receiver) Run(ctx context.Context, sink channel.Sink) error {
 func (r *Receiver) handle(w http.ResponseWriter, req *http.Request) {
 	key := r.host.ClientKey(req)
 	if r.bad.Blocked(key) {
+		r.log.Warn("webhook refused: too many bad signatures from this client", "channel", r.cfg.Name, "client", key)
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
@@ -109,6 +110,7 @@ func (r *Receiver) handle(w http.ResponseWriter, req *http.Request) {
 		ok := webhook.VerifyHex([]byte(r.cfg.AppSecret), body, req.Header.Get("X-Hub-Signature-256"))
 		if !ok {
 			r.bad.Add(key)
+			r.log.Warn("webhook refused: bad signature", "channel", r.cfg.Name, "client", key)
 		}
 		return ok
 	}, r.accept).ServeHTTP(w, req)

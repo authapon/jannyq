@@ -177,6 +177,7 @@ type event struct {
 func (c *Channel) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	key := c.host.ClientKey(r)
 	if c.bad.Blocked(key) {
+		c.log.Warn("webhook refused: too many bad signatures from this client", "client", key)
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
@@ -184,6 +185,7 @@ func (c *Channel) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		ok := webhook.VerifyBase64([]byte(c.cfg.ChannelSecret), body, r.Header.Get("X-Line-Signature"))
 		if !ok {
 			c.bad.Add(key)
+			c.log.Warn("webhook refused: bad signature", "client", key)
 		}
 		return ok
 	}, c.accept).ServeHTTP(w, r)

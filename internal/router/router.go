@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/authapon/jannyq/internal/agent"
 	"github.com/authapon/jannyq/internal/channel"
@@ -84,6 +85,8 @@ type Router struct {
 	recordLimiter *ratelimit.Limiter
 	wg            sync.WaitGroup
 	mu            sync.Mutex
+	seenMu        sync.Mutex
+	seen          map[string]bool // users met since start-up (bounded)
 	compactAt     map[string]time.Time
 }
 
@@ -112,6 +115,7 @@ func New(cfg Config, sessions *session.Manager, a *agent.Agent, tr *i18n.Transla
 
 		recordLimiter: ratelimit.New(recordsPerMinute, time.Minute),
 		compactAt:     map[string]time.Time{},
+		seen:          map[string]bool{},
 	}
 	for _, u := range cfg.AllowedUsers {
 		if u = strings.TrimSpace(u); u != "" {
@@ -153,6 +157,7 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 		in.ReceivedAt = time.Now()
 	}
 	r.cfg.Metrics.MessagesReceived.Inc(in.Channel, strconv.FormatBool(!in.IsGroup || in.Addressed))
+	r.noteArrival(in)
 	if in.IsGroup && !in.Addressed && r.cfg.GroupReply != GroupReplyAll {
 		r.record(ctx, in) // not for us, but part of the conversation
 		return
@@ -166,6 +171,7 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 		return
 	}
 	if !r.limiter.Allow(in.Channel + ":" + in.UserID) {
+		r.log.Info("message refused: rate limit", "channel", in.Channel, "chat", in.ChatID, "user", in.UserID)
 		r.cfg.Metrics.MessagesRejected.Inc(in.Channel, "rate_limited")
 		accept()
 		r.say(ctx, in, r.tr.T("rate_limited"))
@@ -193,6 +199,7 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 			})
 		}
 		accept()
+		r.log.Info("command", "command", cmd, "channel", in.Channel, "chat", in.ChatID, "user", in.UserID)
 		stopTyping := r.keepTyping(ctx, in.Responder)
 		defer stopTyping()
 		if r.command(ctx, in, cmd, upTo) {
@@ -227,6 +234,7 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	})
 	switch {
 	case errors.Is(err, session.ErrBusy):
+		r.log.Info("message refused: the chat has too many requests waiting", "channel", in.Channel, "chat", in.ChatID, "user", in.UserID)
 		r.cfg.Metrics.MessagesRejected.Inc(in.Channel, "busy")
 		r.say(ctx, in, r.tr.T("busy"))
 	case err != nil && ctx.Err() == nil:
@@ -274,7 +282,36 @@ func (r *Router) introduce(ctx context.Context, s *session.Session, in channel.I
 		return false
 	}
 	r.say(ctx, in, text)
+	r.log.Info("introduced the bot", "channel", in.Channel, "chat", in.ChatID)
 	return true
+}
+
+// noteArrival logs that a message came in, never what it says: who, where and
+// how big. The first message of a user since start-up also says that the user
+// is new to this run. Messages kept only as group context are logged at debug
+// level, as there can be many.
+func (r *Router) noteArrival(in channel.Incoming) {
+	key := in.Channel + ":" + in.UserID
+	r.seenMu.Lock()
+	first := !r.seen[key]
+	if first {
+		if len(r.seen) >= 20000 {
+			r.seen = map[string]bool{}
+		}
+		r.seen[key] = true
+	}
+	r.seenMu.Unlock()
+	if first {
+		r.log.Info("user connected", "channel", in.Channel, "user", in.UserID, "name", in.UserName,
+			"chat", in.ChatID, "group", in.IsGroup)
+	}
+	level := slog.LevelInfo
+	if in.IsGroup && !in.Addressed && r.cfg.GroupReply != GroupReplyAll {
+		level = slog.LevelDebug
+	}
+	r.log.Log(context.Background(), level, "message received", "channel", in.Channel, "chat", in.ChatID,
+		"user", in.UserID, "group", in.IsGroup, "addressed", in.Addressed,
+		"chars", utf8.RuneCountInString(in.Text), "files", len(in.Attachments))
 }
 
 // store saves an incoming message and returns its id.
@@ -334,9 +371,12 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 	}
 	r.cfg.Metrics.Replies.Inc(in.Channel, result)
 	r.cfg.Metrics.RequestSeconds.Since(began, in.Channel)
-	if err := in.Responder.Send(ctx, reply); err != nil {
-		r.log.Error("send failed", "channel", in.Channel, "chat", in.ChatID, "err", err)
+	sendErr := in.Responder.Send(ctx, reply)
+	if sendErr != nil {
+		r.log.Error("send failed", "channel", in.Channel, "chat", in.ChatID, "err", sendErr)
 	}
+	r.log.Info("reply", "channel", in.Channel, "chat", in.ChatID, "user", in.UserID, "result", result,
+		"delivered", sendErr == nil, "chars", utf8.RuneCountInString(reply), "took", time.Since(began).Round(time.Millisecond))
 
 	// Compaction runs after the reply so the user is not kept waiting.
 	cctx, ccancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
