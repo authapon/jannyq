@@ -121,7 +121,7 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--cli` | `false` | enable the terminal channel |
 | `--allowed-users` | everyone | comma-separated user IDs or `channel:id` |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
-| `--intro` | `true` | the first time the bot answers in a chat it introduces itself (in `--lang`, with `--bot-name`); `false` skips that |
+| `--intro` | `true` | the first time the bot answers in a chat, the **model** introduces itself (it reads the system prompt, so it describes the tools and skills you configured, and writes in `--lang`); the introduction is saved in the history like any reply, costs one extra model call per chat, and `false` turns it off |
 | `--commands` | `true` | chat commands `/help`, `/reset`, `/compact`; `false` removes **all** slash commands: such text is just a message for the model, and the web chat hides its **New chat** button |
 | `--rate-limit` | `20` | messages per user per minute |
 | `--system-prompt[-file]` | – | extra instructions for the model |

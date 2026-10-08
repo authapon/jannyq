@@ -93,6 +93,9 @@ type Input struct {
 	// When later messages were stored while it waited, the model is told which
 	// one to answer. Zero means the newest.
 	AnswerFor int64
+	// Introduced says that the model has just introduced itself in reply to
+	// this message, so the answer should not repeat it.
+	Introduced bool
 }
 
 // Agent drives conversations.
@@ -236,6 +239,9 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		msgs := a.buildMessages(in, summary, history, len(defs) > 0, final)
 		if note != "" {
 			msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: note})
+		}
+		if in.Introduced {
+			msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: afterIntroNote})
 		}
 
 		resp, err := a.chat(ctx, llm.Request{

@@ -50,10 +50,9 @@ type Config struct {
 	// NoCommands turns the chat commands off: "/reset" and friends are
 	// ordinary text for the model.
 	NoCommands bool
-	// BotName is how the bot introduces itself; NoIntro turns the greeting
-	// that opens the first conversation with a chat off.
-	BotName        string
-	NoIntro        bool
+	// Intro makes the model introduce itself the first time it answers in a
+	// chat; the introduction is part of the history.
+	Intro          bool
 	RateLimit      int // messages per user per minute; 0 = unlimited
 	MaxConcurrent  int // simultaneous model runs
 	RequestTimeout time.Duration
@@ -189,8 +188,6 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 		}
 	}
 
-	r.introduce(ctx, in)
-
 	// Store the message now, in the order it arrived, without waiting for a
 	// request of this chat that may still be running.
 	id, err := r.store(ctx, in, text)
@@ -226,34 +223,38 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	}
 }
 
-// introduce greets a chat the first time the bot is about to answer in it,
-// in the configured language.
-func (r *Router) introduce(ctx context.Context, in channel.Incoming) {
-	if r.cfg.NoIntro {
-		return
+// introduce has the model greet a chat the first time it is about to answer
+// in it, and sends the greeting. It reports whether that happened; a failure
+// is not fatal, the answer simply comes without a greeting and the next
+// message tries again. It runs inside the chat's exclusive session lock.
+func (r *Router) introduce(ctx context.Context, s *session.Session, in channel.Incoming, input agent.Input) bool {
+	if !r.cfg.Intro {
+		return false
 	}
-	var first bool
-	err := r.sessions.Record(in.Channel, in.ChatID, func(s *session.Session) error {
-		var err error
-		first, err = s.FirstReply(ctx)
-		return err
-	})
+	first, err := s.FirstReply(ctx)
 	if err != nil {
 		r.log.Warn("could not check whether the chat has been greeted", "channel", in.Channel, "chat", in.ChatID, "err", err)
-		return
+		return false
 	}
 	if !first {
-		return
+		return false
 	}
-	key := "intro"
-	if r.cfg.NoCommands {
-		key = "intro_nocmd"
+	extra := ""
+	if !r.cfg.NoCommands {
+		extra = "Chat commands exist (/help lists them): mention that people can type /help."
 	}
-	name := r.cfg.BotName
-	if name == "" {
-		name = "Jannyq"
+	ictx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
+	defer cancel()
+	text, err := r.agent.Introduce(ictx, s, input, extra)
+	if err != nil {
+		if ctx.Err() == nil {
+			r.log.Warn("could not introduce the bot", "channel", in.Channel, "chat", in.ChatID, "err", err)
+		}
+		_ = s.RetryFirstReply(context.WithoutCancel(ctx))
+		return false
 	}
-	r.say(ctx, in, r.tr.T(key, name))
+	r.say(ctx, in, text)
+	return true
 }
 
 // store saves an incoming message and returns its id.
@@ -293,6 +294,7 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 	defer cancel()
 	input := r.input(in, text)
 	input.AnswerFor = id
+	input.Introduced = r.introduce(reqCtx, s, in, input)
 	start := time.Now()
 	reply, err := r.agent.Respond(reqCtx, s, input)
 	result := "ok"

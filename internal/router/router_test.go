@@ -75,9 +75,6 @@ func newRouterWith(t *testing.T, p llm.Provider, cfg Config, acfg agent.Config) 
 		acfg.Location = time.UTC
 	}
 	ag := agent.New(acfg, p, nil, log)
-	// The greeting would clutter every expectation below, so it is off unless
-	// a test names the bot, which is what the greeting needs.
-	cfg.NoIntro = cfg.NoIntro || cfg.BotName == ""
 	return New(cfg, sm, ag, i18n.New("en"), log)
 }
 
@@ -850,22 +847,72 @@ func TestNoCommandsLeavesSlashTextToTheModel(t *testing.T) {
 	}
 }
 
-func TestIntroducesItselfOncePerChat(t *testing.T) {
-	f := &fakeLLM{}
-	r := newRouter(t, f, Config{BotName: "Janny"})
+// introLLM answers the introduction request with a greeting that echoes what
+// it was shown, and every other request with "pong".
+func introLLM() *fakeLLM {
+	return &fakeLLM{reply: func(req llm.Request) (*llm.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		text := "pong"
+		if last.Role == llm.RoleSystem && strings.Contains(last.Content, "first time you speak") {
+			text = "Hello, I am Janny."
+			if strings.Contains(last.Content, "/help") {
+				text += " Type /help."
+			}
+			if len(req.Tools) != 0 {
+				text = "tools offered during the introduction"
+			}
+		}
+		return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: text}}, nil
+	}}
+}
+
+func TestModelIntroducesItselfOncePerChat(t *testing.T) {
+	f := introLLM()
+	r := newRouterWith(t, f, Config{Intro: true}, agent.Config{Model: "m", BotName: "Janny", Lang: "th", ExtraPrompt: "Company rule: be kind."})
 	rec := &recorder{}
 
 	r.Handle(ctx, msg(rec, "hi"))
 	r.Handle(ctx, msg(rec, "and again"))
 	got := rec.all()
-	if len(got) != 3 || !strings.HasPrefix(got[0], "Hi! I'm Janny,") || !strings.Contains(got[0], "/help") || got[1] != "pong" || got[2] != "pong" {
+	if len(got) != 3 || got[0] != "Hello, I am Janny. Type /help." || got[1] != "pong" || got[2] != "pong" {
 		t.Fatalf("sent = %q", got)
 	}
 
-	// a reset does not make the bot introduce itself again
+	// the model read the system prompt and was asked to write in the main language
+	f.mu.Lock()
+	intro := f.requests[0].Messages
+	answer := f.requests[1].Messages
+	f.mu.Unlock()
+	if sys := intro[0].Content; !strings.Contains(sys, "You are Janny") || !strings.Contains(sys, "Company rule: be kind.") {
+		t.Errorf("the introduction did not use the system prompt: %q", sys)
+	}
+	if note := intro[len(intro)-1].Content; !strings.Contains(note, "Thai") {
+		t.Errorf("language not requested: %q", note)
+	}
+	// the answer that follows knows it must not introduce itself again
+	if note := answer[len(answer)-1].Content; !strings.Contains(note, "introduction") {
+		t.Errorf("answer after the introduction: %q", note)
+	}
+
+	// the introduction is in the history like any message: after the message that
+	// prompted it, before the answer
+	var roles, texts []string
+	err := r.sessions.With(ctx, "test", "c1", func(s *session.Session) error {
+		st, err := s.Messages(ctx)
+		for _, m := range st {
+			roles = append(roles, string(m.Message.Role))
+			texts = append(texts, m.Message.Content)
+		}
+		return err
+	})
+	if err != nil || len(texts) != 5 || roles[0] != "user" || texts[1] != "Hello, I am Janny. Type /help." || texts[2] != "pong" || roles[3] != "user" {
+		t.Errorf("history = %q %q (err %v)", roles, texts, err)
+	}
+
+	// a reset does not bring the introduction back
 	r.Handle(ctx, msg(rec, "/reset"))
 	r.Handle(ctx, msg(rec, "hello again"))
-	if got = rec.all(); len(got) != 5 || got[3] != "Done. This conversation has been cleared." || got[4] != "pong" {
+	if got = rec.all(); len(got) != 5 || got[4] != "pong" {
 		t.Errorf("after reset: %q", got)
 	}
 
@@ -874,39 +921,65 @@ func TestIntroducesItselfOncePerChat(t *testing.T) {
 	in := msg(other, "hi")
 	in.ChatID = "c2"
 	r.Handle(ctx, in)
-	if got = other.all(); len(got) != 2 || !strings.HasPrefix(got[0], "Hi! I'm Janny") {
+	if got = other.all(); len(got) != 2 || got[0] != "Hello, I am Janny. Type /help." {
 		t.Errorf("second chat: %q", got)
 	}
 }
 
 func TestIntroductionFitsTheSetup(t *testing.T) {
-	// no commands: the greeting must not point at /help
-	r := newRouter(t, &fakeLLM{}, Config{BotName: "Janny", NoCommands: true})
+	// no commands: the model is not told to point at /help
+	r := newRouter(t, introLLM(), Config{Intro: true, NoCommands: true})
 	rec := &recorder{}
 	r.Handle(ctx, msg(rec, "hi"))
-	if got := rec.all(); len(got) != 2 || strings.Contains(got[0], "/help") || !strings.Contains(got[0], "Janny") {
+	if got := rec.all(); len(got) != 2 || got[0] != "Hello, I am Janny." {
 		t.Errorf("no commands: %q", got)
 	}
 
-	// switched off
-	r = newRouter(t, &fakeLLM{}, Config{BotName: "Janny", NoIntro: true})
+	// off by default
+	f := introLLM()
+	r = newRouter(t, f, Config{})
 	rec = &recorder{}
 	r.Handle(ctx, msg(rec, "hi"))
-	if got := rec.all(); len(got) != 1 || got[0] != "pong" {
-		t.Errorf("intro off: %q", got)
+	if got := rec.all(); len(got) != 1 || got[0] != "pong" || f.calls() != 1 {
+		t.Errorf("intro off: %q, %d model calls", got, f.calls())
 	}
 
 	// a first message that is a command is answered by the command alone
-	r = newRouter(t, &fakeLLM{}, Config{BotName: "Janny"})
+	f = introLLM()
+	r = newRouter(t, f, Config{Intro: true})
 	rec = &recorder{}
 	r.Handle(ctx, msg(rec, "/help"))
-	if got := rec.all(); len(got) != 1 || !strings.Contains(got[0], "Commands:") {
-		t.Errorf("first command: %q", got)
+	if got := rec.all(); len(got) != 1 || !strings.Contains(got[0], "Commands:") || f.calls() != 0 {
+		t.Errorf("first command: %q, %d model calls", got, f.calls())
+	}
+}
+
+func TestFailedIntroductionIsRetriedAndDoesNotBlockTheAnswer(t *testing.T) {
+	fail := true
+	f := introLLM()
+	inner := f.reply
+	f.reply = func(req llm.Request) (*llm.Response, error) {
+		if last := req.Messages[len(req.Messages)-1]; fail && strings.Contains(last.Content, "first time you speak") {
+			return nil, errors.New("model unavailable")
+		}
+		return inner(req)
+	}
+	r := newRouter(t, f, Config{Intro: true})
+	rec := &recorder{}
+	r.Handle(ctx, msg(rec, "hi"))
+	if got := rec.all(); len(got) != 1 || got[0] != "pong" {
+		t.Fatalf("answer must still come: %q", got)
+	}
+	fail = false
+	r.Handle(ctx, msg(rec, "hi again"))
+	if got := rec.all(); len(got) != 3 || got[1] != "Hello, I am Janny. Type /help." || got[2] != "pong" {
+		t.Errorf("retry: %q", got)
 	}
 }
 
 func TestOnlyOneOfSimultaneousFirstMessagesIsGreeted(t *testing.T) {
-	r := newRouter(t, &fakeLLM{}, Config{BotName: "Janny"})
+	f := introLLM()
+	r := newRouter(t, f, Config{Intro: true})
 	rec := &recorder{}
 	var wg sync.WaitGroup
 	for i := 0; i < 6; i++ {
@@ -916,11 +989,11 @@ func TestOnlyOneOfSimultaneousFirstMessagesIsGreeted(t *testing.T) {
 	wg.Wait()
 	n := 0
 	for _, s := range rec.all() {
-		if strings.HasPrefix(s, "Hi! I'm Janny") {
+		if strings.HasPrefix(s, "Hello, I am Janny") {
 			n++
 		}
 	}
 	if n != 1 {
-		t.Errorf("greetings = %d, want 1", n)
+		t.Errorf("greetings = %d, want 1 (sent %q)", n, rec.all())
 	}
 }

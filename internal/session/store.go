@@ -339,11 +339,24 @@ func (s *Session) FirstReply(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return false, nil
+		// greeted already, unless the greeting failed and is waiting for a retry
+		res, err = s.db.ExecContext(ctx, `UPDATE meta SET value = '1' WHERE key = ? AND value = 'retry'`, metaIntroduced)
+		if err != nil {
+			return false, err
+		}
+		n, _ = res.RowsAffected()
+		return n > 0, nil
 	}
 	var answered bool
 	err = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE role = 'assistant' AND content != '')`).Scan(&answered)
 	return !answered, err
+}
+
+// RetryFirstReply makes FirstReply true once more, for when the greeting could
+// not be made and should be tried again with the next message.
+func (s *Session) RetryFirstReply(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE meta SET value = 'retry' WHERE key = ?`, metaIntroduced)
+	return err
 }
 
 // IsGroup reports whether the chat is a group (several people talk to the bot).

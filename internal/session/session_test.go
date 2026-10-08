@@ -876,6 +876,16 @@ func TestFirstReply(t *testing.T) {
 		if first, _ := s.FirstReply(ctx); first {
 			t.Error("a reset must not bring the greeting back")
 		}
+		// a greeting that failed is offered again, once
+		if err := s.RetryFirstReply(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if first, _ := s.FirstReply(ctx); !first {
+			t.Error("a failed greeting should be retried")
+		}
+		if first, _ := s.FirstReply(ctx); first {
+			t.Error("the retry happens once")
+		}
 	})
 
 	// a chat that already has answers (it predates the greeting) is marked, not greeted

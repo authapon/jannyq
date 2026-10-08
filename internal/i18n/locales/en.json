@@ -1,7 +1,5 @@
 {
   "help": "Hi! I'm an AI assistant. Just send me a message and I'll do my best to help. I can search the web and read web pages when needed, and I can read pictures, PDF files and text files you send me.\n\nCommands:\n/help - show this message\n/reset - forget this conversation (and delete its files) and start fresh\n/compact - summarise older messages to free up memory",
-  "intro": "Hi! I'm %s, an AI assistant. Just send me a message and I'll do my best to help. Type /help to see what I can do and the commands I understand.",
-  "intro_nocmd": "Hi! I'm %s, an AI assistant. Just send me a message and I'll do my best to help.",
   "reset_done": "Done. This conversation has been cleared.",
   "compact_done": "Done. Older messages have been summarised.",
   "compact_nothing": "The conversation is still short; there is nothing to compact yet.",
