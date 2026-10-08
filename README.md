@@ -395,6 +395,21 @@ Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask ab
   (reciprocal rank fusion) and vector matches below `--knowledge-min-similarity` are dropped. Without an embedding model — or while
   it is unreachable — search works by words only, and the answer says so. Good choices for Ollama: `bge-m3` (multilingual, Thai included)
   or the smaller `nomic-embed-text`. Changing `--embed-model` re-embeds the stored passages without re-reading the files.
+- **Two ways to answer: passages or whole documents** (`--knowledge-mode`, env `JANNYQ_KNOWLEDGE_MODE`):
+
+  | | `passages` (default) | `whole` |
+  |---|---|---|
+  | The model gets | the best passages (about 1200 characters each) with the rest of their section | the **complete text** of the best matching document(s) |
+  | Good for | big documents and many of them; precise questions; small models and small contexts | short documents (policies, FAQs, price lists) where a missed line matters; "summarise this document" |
+  | Costs | a few thousand tokens per search | up to the whole budget per search: slower, more memory on the model server |
+
+  In `whole` mode a search ranks the documents by their best-matching passages and attaches the best ones in full, up to three
+  documents and `--knowledge-whole-tokens` tokens together (`0` = half of `--context-size`, or 12000 when no context size is set; the size
+  is estimated from the text, generously for Thai). A document that does not fit is **not** cut: it is answered with its best passages
+  as in the first mode (with a note saying so), so a handbook of 280 pages still works next to short documents. The complete text is
+  rebuilt from the stored passages, so existing indexes work without being rebuilt (PDF pages are marked `[page N]`). Documents are kept
+  in the conversation only until the question is answered, then replaced by a short note, so that they do not fill the context for
+  every later message (a repeated question searches again). `knowledge_read` stays available in both modes.
 - **Lists and sections that run across passages**: documents are cut into passages of about `--knowledge-chunk-chars` (1200) characters, so a
   list can end up half in one passage and half in the next (a curriculum's nine learning outcomes, say, with the model answering with the
   first five). Search results therefore say where each passage sits (`passage 44 of 487`), and **for the two best hits the rest of

@@ -359,6 +359,12 @@ func (s *Session) RetryFirstReply(ctx context.Context) error {
 	return err
 }
 
+// ReplaceToolResult changes the content of a stored tool result.
+func (s *Session) ReplaceToolResult(ctx context.Context, id int64, content string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE messages SET content = ? WHERE id = ? AND role = 'tool'`, content, id)
+	return err
+}
+
 // IsGroup reports whether the chat is a group (several people talk to the bot).
 func (s *Session) IsGroup(ctx context.Context) bool {
 	v, _ := s.Meta(ctx, metaGroup)

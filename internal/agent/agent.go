@@ -296,6 +296,10 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		cc.Attachments = sessionFiles{s}
 	}
 
+	if startID, err := s.LastID(ctx); err == nil {
+		defer a.dropWholeFiles(context.WithoutCancel(ctx), s, startID)
+	}
+
 	pre, preDone := "", false
 	prefetch := func() {
 		if !preDone {
@@ -519,7 +523,31 @@ func (a *Agent) runTool(ctx context.Context, cc tool.CallContext, tc llm.ToolCal
 	if err != nil {
 		return "Error: " + err.Error()
 	}
+	if u, ok := t.(tool.Uncapped); ok && u.Uncapped() {
+		return out
+	}
 	return tool.Truncate(out, a.cfg.ToolMaxOutput)
+}
+
+// dropWholeFiles replaces, in the messages stored since startID, the results of
+// searches that attached whole documents by a short note. The documents were
+// needed to answer; kept in the conversation they would fill the context for
+// every later message of the chat.
+func (a *Agent) dropWholeFiles(ctx context.Context, s *session.Session, startID int64) {
+	stored, err := s.Messages(ctx)
+	if err != nil {
+		return
+	}
+	for _, st := range stored {
+		if st.ID <= startID || st.Message.Role != llm.RoleTool {
+			continue
+		}
+		if stub, ok := tool.WholeFileStub(st.Message.Content); ok {
+			if err := s.ReplaceToolResult(ctx, st.ID, stub); err != nil {
+				a.log.Warn("could not shrink a stored document result", "err", err)
+			}
+		}
+	}
 }
 
 // answerNote tells the model which message to answer when messages were

@@ -302,3 +302,96 @@ func TestSearchShowsTheWholeSectionAroundTheBestHit(t *testing.T) {
 		t.Errorf("expansion is off:\n%s", out)
 	}
 }
+
+func TestWholeModeReturnsTheCompleteDocuments(t *testing.T) {
+	kb := testKB(t)
+	ctx := context.Background()
+	k := &KnowledgeSearch{KB: kb, Whole: true, WholeTokens: 100000}
+	out, err := k.Execute(ctx, CallContext{}, []byte(`{"query":"paid vacation days"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"[whole-file result: hr/leave.pdf; notes.md]\n",
+		"=== hr/leave.pdf, 2 pages: complete text ===", "[page 2]\nEmployees receive ten days of paid vacation per year.",
+		"[page 3]\nSick leave rules apply.", // the second passage of the file comes with it, though it matches nothing
+		"=== end of hr/leave.pdf ===",
+		"=== notes.md: complete text ===", "Vacation requests go to HR.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%.600s", want, out)
+		}
+	}
+	if strings.Contains(out, "truncated") || strings.Contains(out, "[1] ") {
+		t.Errorf("passages or a cut in a whole-file answer:\n%.400s", out)
+	}
+	if !k.Uncapped() || (&KnowledgeSearch{}).Uncapped() {
+		t.Error("only whole mode is exempt from the output cap")
+	}
+	if !strings.Contains(k.Description(), "complete text") || strings.Contains((&KnowledgeSearch{}).Description(), "complete text") {
+		t.Error("the tool description must say which way it answers")
+	}
+	if h := k.Hint(); !strings.Contains(h, "complete text of the best matching") {
+		t.Errorf("hint: %s", h)
+	}
+
+	// the stub that replaces such a result once the question is answered
+	stub, ok := WholeFileStub(out)
+	if !ok || !strings.Contains(stub, "hr/leave.pdf; notes.md") || strings.Contains(stub, "ten days") {
+		t.Errorf("stub = %q, %v", stub, ok)
+	}
+	if _, ok := WholeFileStub("2 passage(s) of the knowledge base"); ok {
+		t.Error("an ordinary result is not a document result")
+	}
+
+	// the prefetch for models without tools gets the documents too
+	pre, err := k.Retrieve(ctx, "paid vacation days")
+	if err != nil || !strings.Contains(pre, "Sick leave rules apply.") {
+		t.Errorf("prefetch: %v\n%.300s", err, pre)
+	}
+}
+
+func TestWholeModeFallsBackToPassagesForALongDocument(t *testing.T) {
+	kb := testKB(t) // hr/leave.pdf holds about 1,200 tokens of sick-leave text, notes.md only a few
+	ctx := context.Background()
+	k := &KnowledgeSearch{KB: kb, Whole: true, WholeTokens: 200}
+	out, err := k.Execute(ctx, CallContext{}, []byte(`{"query":"paid vacation days"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "[whole-file result: notes.md]\n") || !strings.Contains(out, "=== notes.md: complete text ===") {
+		t.Errorf("the short document is still attached whole:\n%.500s", out)
+	}
+	if !strings.Contains(out, "Too long to attach whole") || !strings.Contains(out, "hr/leave.pdf (about ") ||
+		!strings.Contains(out, "hr/leave.pdf, page 2 (passage 1 of 2)") || !strings.Contains(out, "ten days of paid vacation") {
+		t.Errorf("the long document must be answered with its passages:\n%.900s", out)
+	}
+	if strings.Contains(out, "=== hr/leave.pdf") {
+		t.Errorf("the long document was attached whole:\n%.500s", out)
+	}
+	// nothing fits: no whole-file marker at all
+	k.WholeTokens = 1
+	out, _ = k.Execute(ctx, CallContext{}, []byte(`{"query":"paid vacation days"}`))
+	if strings.Contains(out, WholeFileMarker) || !strings.Contains(out, "ten days of paid vacation") {
+		t.Errorf("nothing fits:\n%.500s", out)
+	}
+	// no match: the usual answer
+	out, _ = k.Execute(ctx, CallContext{}, []byte(`{"query":"submarine"}`))
+	if !strings.Contains(out, "No passage") {
+		t.Errorf("no match:\n%s", out)
+	}
+}
+
+func TestWholeModeAttachesAtMostThreeDocuments(t *testing.T) {
+	kb := testKB(t)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		_ = kb.Store.Replace(ctx, knowledge.File{Path: fmt.Sprintf("doc%d.txt", i), Size: 1, MtimeNS: 1, Kind: "text"},
+			[]knowledge.EmbeddedChunk{{Chunk: knowledge.Chunk{Text: fmt.Sprintf("Quokka facts, document number %d.", i)}}})
+	}
+	k := &KnowledgeSearch{KB: kb, Whole: true, WholeTokens: 100000}
+	out, _ := k.Execute(ctx, CallContext{}, []byte(`{"query":"quokka facts"}`))
+	if n := strings.Count(out, "complete text ==="); n != maxWholeFiles {
+		t.Errorf("%d documents attached whole, the limit is %d:\n%.700s", n, maxWholeFiles, out)
+	}
+}

@@ -628,3 +628,63 @@ func TestContextUse(t *testing.T) {
 		}
 	})
 }
+
+// wholeTool answers like a knowledge search that attached a whole document.
+type wholeTool struct{ text string }
+
+func (wholeTool) Name() string        { return "docs" }
+func (wholeTool) Description() string { return "docs" }
+func (wholeTool) Parameters() []byte  { return []byte(`{"type":"object"}`) }
+func (w wholeTool) Execute(context.Context, tool.CallContext, []byte) (string, error) {
+	return "[whole-file result: book.md]\nDocuments:\n" + w.text, nil
+}
+func (wholeTool) Uncapped() bool { return true }
+
+func TestWholeDocumentsAreNotKeptAfterTheAnswer(t *testing.T) {
+	long := strings.Repeat("A long document, as long as it is. ", 1000) // 35,000 characters
+	var secondRequest []llm.Message
+	p := &fakeProvider{script: []func(llm.Request) (*llm.Response, error){
+		callTool("c1", "docs", `{}`),
+		func(req llm.Request) (*llm.Response, error) {
+			secondRequest = req.Messages
+			return say("the answer")(req)
+		},
+		say("a later answer"),
+	}}
+	a := newAgent(p, Config{ToolMaxOutput: 500}, wholeTool{text: long})
+	withSession(t, func(s *session.Session) {
+		if got, err := a.Reply(ctx, s, Input{Text: "what does the book say?"}); err != nil || got != "the answer" {
+			t.Fatalf("%q %v", got, err)
+		}
+		// while the question is being answered the model has the whole text, uncut
+		var result string
+		for _, m := range secondRequest {
+			if m.Role == llm.RoleTool {
+				result = m.Content
+			}
+		}
+		if !strings.Contains(result, strings.TrimSpace(long[len(long)-100:])) || strings.Contains(result, "truncated") {
+			t.Errorf("the result given to the model was cut (%d characters)", len(result))
+		}
+		// afterwards only a note is kept
+		var stored string
+		msgs, _ := s.Messages(ctx)
+		for _, m := range msgs {
+			if m.Message.Role == llm.RoleTool {
+				stored = m.Message.Content
+			}
+		}
+		if !strings.Contains(stored, "book.md") || strings.Contains(stored, "long document") || len(stored) > 300 {
+			t.Errorf("stored result = %q", stored)
+		}
+		// and the next message does not carry the document
+		if _, err := a.Reply(ctx, s, Input{Text: "thanks"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range p.requests[2].Messages {
+			if strings.Contains(m.Content, "long document") {
+				t.Error("the document is in the next request")
+			}
+		}
+	})
+}

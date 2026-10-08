@@ -529,3 +529,21 @@ func TestThinkingAndExtraBody(t *testing.T) {
 		}
 	}
 }
+
+func TestKnowledgeModeAndWholeTokens(t *testing.T) {
+	model := map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_KNOWLEDGE_DIR": t.TempDir()}
+	c, err := load(t, nil, model)
+	if err != nil || c.KnowledgeMode != "passages" || c.KnowledgeWholeTokens != 0 {
+		t.Fatalf("defaults: %v %q %d", err, c.KnowledgeMode, c.KnowledgeWholeTokens)
+	}
+	c, err = load(t, []string{"--knowledge-mode", "whole", "--knowledge-whole-tokens", "30000"}, model)
+	if err != nil || c.KnowledgeMode != "whole" || c.KnowledgeWholeTokens != 30000 {
+		t.Fatalf("whole: %v %q %d", err, c.KnowledgeMode, c.KnowledgeWholeTokens)
+	}
+	if _, err = load(t, []string{"--knowledge-mode", "everything"}, model); err == nil || !strings.Contains(err.Error(), "--knowledge-mode") {
+		t.Errorf("a bad mode must be refused: %v", err)
+	}
+	if _, err = load(t, []string{"--knowledge-whole-tokens", "-5"}, model); err == nil || !strings.Contains(err.Error(), "--knowledge-whole-tokens") {
+		t.Errorf("a negative budget must be refused: %v", err)
+	}
+}

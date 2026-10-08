@@ -511,7 +511,8 @@ func TestACollectingGroupIsCompactedInTheBackground(t *testing.T) {
 	_ = r.sessions.Record("tg", "g1", func(s *session.Session) error {
 		sum, _ := s.Summary(ctx)
 		count, _ := s.Count(ctx)
-		if !strings.Contains(sum, "lunch") || count > 6 {
+		// 4 kept, plus those recorded while the summary was being written (at most 3)
+		if !strings.Contains(sum, "lunch") || count > 7 {
 			t.Errorf("summary = %q, remaining messages = %d", sum, count)
 		}
 		return nil

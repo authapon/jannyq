@@ -105,7 +105,7 @@ func newKnowledge(ctx context.Context, cfg *config.Config, cr *commandRunner, in
 		store.Close()
 		return nil, err
 	}
-	log.Info("knowledge base enabled", "dir", cfg.KnowledgeDir, "db", dbPath, "embed_model", cfg.EmbedModel,
+	log.Info("knowledge base enabled", "mode", cfg.KnowledgeMode, "dir", cfg.KnowledgeDir, "db", dbPath, "embed_model", cfg.EmbedModel,
 		"semantic", kb.Embedder != nil, "ocr", langs, "interval", cfg.KnowledgeInterval)
 	if kb.Embedder == nil {
 		log.Info("no --embed-model: the knowledge base is searched by words only")
@@ -145,7 +145,13 @@ func (k *knowledgeBase) register(tools *tool.Registry, cfg *config.Config) {
 	if expand == 0 {
 		expand = -1 // off
 	}
-	tools.Register(&tool.KnowledgeSearch{KB: k.kb, Indexer: k.ix, DefaultResults: cfg.KnowledgeResults, ExpandChars: expand})
+	whole := cfg.KnowledgeMode == "whole"
+	wholeTokens := cfg.KnowledgeWholeTokens
+	if wholeTokens == 0 && cfg.ContextSize > 0 {
+		wholeTokens = cfg.ContextSize / 2 // the rest is for the conversation and the answer
+	}
+	tools.Register(&tool.KnowledgeSearch{KB: k.kb, Indexer: k.ix, DefaultResults: cfg.KnowledgeResults, ExpandChars: expand,
+		Whole: whole, WholeTokens: wholeTokens, Overlap: cfg.KnowledgeOverlap})
 	tools.Register(&tool.KnowledgeFiles{KB: k.kb})
 	tools.Register(&tool.KnowledgeRead{KB: k.kb})
 }

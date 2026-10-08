@@ -41,6 +41,12 @@ type Hinter interface {
 	Hint() string
 }
 
+// Uncapped is implemented by tools whose results are not cut at
+// --tool-max-output because they have bounded their own size.
+type Uncapped interface {
+	Uncapped() bool
+}
+
 // Registry holds the enabled tools.
 type Registry struct {
 	tools map[string]Tool
