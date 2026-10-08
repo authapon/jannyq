@@ -122,7 +122,7 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--allowed-users` | everyone | comma-separated user IDs or `channel:id` — only these people get answers ([details and examples](#who-may-use-the-bot---allowed-users---allowed-groups)) |
 | `--allowed-groups` | – | comma-separated **group** IDs (or `channel:id`) where *everybody* gets answers, listed in `--allowed-users` or not ([details](#who-may-use-the-bot---allowed-users---allowed-groups)) |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
-| `--intro` | `true` | the first time the bot answers in a chat, the **model** introduces itself (it reads the system prompt, so it describes the tools and skills you configured, and writes in `--lang`); the introduction is saved in the history like any reply, costs one extra model call per chat, and `false` turns it off |
+| `--intro` | `true` | the first time the bot answers in a chat, the **model** introduces itself (it reads the system prompt, so it describes the tools and skills you configured, and writes in `--lang`); the introduction is saved in the history like any reply (the answer to the same message follows as a second message, except for Telegram's automatic `/start` with `--commands=false`, which gets the introduction alone), costs one extra model call per chat, and `false` turns it off |
 | `--commands` | `true` | chat commands `/help`, `/reset`, `/compact`; `false` removes **all** slash commands: such text is just a message for the model, and the web chat hides its **New chat** button |
 | `--rate-limit` | `20` | messages per user per minute |
 | `--system-prompt[-file]` | – | extra instructions for the model |

@@ -67,4 +67,5 @@ func (a *Agent) Introduce(ctx context.Context, s *session.Session, in Input, ext
 }
 
 const afterIntroNote = "Note from the system (not from a user): your last message in this conversation was your " +
-	"introduction. Now answer the user's message that came before it, without introducing yourself again."
+	"introduction. Now answer the user's message that came before it, without introducing yourself again. " +
+	"If that message was only a greeting, do not greet a second time: just carry on naturally, for example by asking what they need."

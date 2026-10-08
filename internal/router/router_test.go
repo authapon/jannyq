@@ -1166,3 +1166,47 @@ func TestAllowedGroupsAloneRestrictsToThoseGroups(t *testing.T) {
 		t.Errorf("group-reply all in a listed group: %q", got)
 	}
 }
+
+func TestFirstStartWithoutCommandsGetsTheIntroductionOnly(t *testing.T) {
+	f := introLLM()
+	r := newRouter(t, f, Config{Intro: true, NoCommands: true})
+	rec := &recorder{}
+	r.Handle(ctx, msg(rec, "/start"))
+	if got := rec.all(); len(got) != 1 || got[0] != "Hello, I am Janny." || f.calls() != 1 {
+		t.Fatalf("first /start: sent %q, %d model calls (want the introduction alone)", got, f.calls())
+	}
+	// it is in the history, after the /start that prompted it
+	var texts []string
+	_ = r.sessions.With(ctx, "test", "c1", func(s *session.Session) error {
+		st, _ := s.Messages(ctx)
+		for _, m := range st {
+			texts = append(texts, m.Message.Content)
+		}
+		return nil
+	})
+	if len(texts) != 2 || texts[0] != "/start" || texts[1] != "Hello, I am Janny." {
+		t.Errorf("history = %q", texts)
+	}
+	// later it is ordinary text again: the model answers it
+	r.Handle(ctx, msg(rec, "/start"))
+	if got := rec.all(); len(got) != 2 || got[1] != "pong" {
+		t.Errorf("second /start: %q", got)
+	}
+
+	// any other first message is introduced and answered
+	rec = &recorder{}
+	in := msg(rec, "สวัสดี")
+	in.ChatID = "c2"
+	r.Handle(ctx, in)
+	if got := rec.all(); len(got) != 2 || got[1] != "pong" {
+		t.Errorf("greeting: %q", got)
+	}
+
+	// with the introduction off, /start is just a message
+	r = newRouter(t, introLLM(), Config{NoCommands: true})
+	rec = &recorder{}
+	r.Handle(ctx, msg(rec, "/start"))
+	if got := rec.all(); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("intro off: %q", got)
+	}
+}

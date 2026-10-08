@@ -222,7 +222,7 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 				return nil // nothing to answer: the user was told what went wrong
 			}
 		}
-		r.respond(ctx, s, in, text, id)
+		r.respond(ctx, s, in, text, id, r.isStart(text) && !hasFiles)
 		return nil
 	})
 	switch {
@@ -233,6 +233,14 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 		r.log.Error("session error", "channel", in.Channel, "chat", in.ChatID, "err", err)
 		r.say(ctx, in, r.tr.T("error_generic"))
 	}
+}
+
+// isStart reports whether text is the "/start" that Telegram sends when a
+// person opens the bot and that, with the commands switched off, would
+// otherwise be an ordinary message.
+func (r *Router) isStart(text string) bool {
+	cmd, ok := parseCommand(text)
+	return ok && cmd == "start" && r.cfg.NoCommands && r.cfg.Intro
 }
 
 // introduce has the model greet a chat the first time it is about to answer
@@ -294,7 +302,11 @@ func (r *Router) input(in channel.Incoming, text string) agent.Input {
 
 // respond runs the agent for one stored message and delivers the result. It
 // runs inside the chat's exclusive session lock.
-func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Incoming, text string, id int64) {
+//
+// A first "/start" with commands off (what Telegram sends when someone opens
+// the bot) is answered by the introduction alone: answering it as well would
+// make the bot greet twice.
+func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Incoming, text string, id int64, start bool) {
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
@@ -307,7 +319,10 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 	input := r.input(in, text)
 	input.AnswerFor = id
 	input.Introduced = r.introduce(reqCtx, s, in, input)
-	start := time.Now()
+	if start && input.Introduced {
+		return
+	}
+	began := time.Now()
 	reply, err := r.agent.Respond(reqCtx, s, input)
 	result := "ok"
 	switch {
@@ -318,7 +333,7 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 		reply, result = r.tr.T("error_generic"), "error"
 	}
 	r.cfg.Metrics.Replies.Inc(in.Channel, result)
-	r.cfg.Metrics.RequestSeconds.Since(start, in.Channel)
+	r.cfg.Metrics.RequestSeconds.Since(began, in.Channel)
 	if err := in.Responder.Send(ctx, reply); err != nil {
 		r.log.Error("send failed", "channel", in.Channel, "chat", in.ChatID, "err", err)
 	}

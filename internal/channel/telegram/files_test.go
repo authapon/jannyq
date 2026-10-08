@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,7 +149,10 @@ func runChannel(t *testing.T, c *Channel, want int) []channel.Incoming {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	return append([]channel.Incoming(nil), got...)
+	out := append([]channel.Incoming(nil), got...)
+	// updates are handled concurrently, so arrival order is not send order
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ReceivedAt.Before(out[j].ReceivedAt) })
+	return out
 }
 
 func TestPhotoAndDocumentAreFetched(t *testing.T) {
