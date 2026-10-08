@@ -82,3 +82,38 @@ func TestNewKnowledge(t *testing.T) {
 }
 
 func timeAgo() time.Time { return time.Now().Add(-time.Hour) }
+
+func TestSyncAtStartBuildsTheWholeKnowledgeBase(t *testing.T) {
+	dir, data := t.TempDir(), t.TempDir()
+	cfg := &config.Config{DataDir: data, KnowledgeDir: dir, PDFEngine: "native", OCRLangs: "auto", Lang: "en",
+		KnowledgeMaxFileMB: 5, KnowledgePDFPages: 100, KnowledgeChunkChars: 500, KnowledgeOverlap: 50, KnowledgeResults: 3, KnowledgeInterval: 1e9}
+	for i, text := range []string{"Pangolins are the most trafficked mammals in the world.", "Axolotls regrow lost limbs.", "ไฟล์ภาษาไทยเกี่ยวกับช้างและป่า"} {
+		p := filepath.Join(dir, string(rune('a'+i))+".txt")
+		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := timeAgo()
+		_ = os.Chtimes(p, old, old)
+	}
+	k, err := newKnowledge(context.Background(), cfg, nil, metrics.NewInstruments(nil), quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer k.store.Close()
+	if err := k.syncAtStart(context.Background(), quiet()); err != nil {
+		t.Fatal(err)
+	}
+	// no further scan is needed: the files are all there already
+	for _, q := range []string{"pangolins", "axolotls", "ช้าง"} {
+		res, err := k.kb.Search(context.Background(), q, 3)
+		if err != nil || len(res.Hits) == 0 {
+			t.Errorf("%q: %+v, err %v", q, res, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := k.syncAtStart(ctx, quiet()); err == nil {
+		t.Error("an interrupted start-up must say so")
+	}
+}

@@ -491,3 +491,14 @@ func TestCommandsCanBeSwitchedOff(t *testing.T) {
 		t.Fatalf("flag: err=%v", err)
 	}
 }
+
+func TestAllowedGroupsAreParsed(t *testing.T) {
+	c, err := load(t, []string{"--allowed-groups", " -1001, telegram:-1002 ,,discord:99"}, map[string]string{"JANNYQ_LLM_MODEL": "m"})
+	if err != nil || strings.Join(c.AllowedGroups, "|") != "-1001|telegram:-1002|discord:99" {
+		t.Fatalf("flag: %v %q", err, c.AllowedGroups)
+	}
+	c, err = load(t, nil, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_ALLOWED_GROUPS": "-1001"})
+	if err != nil || len(c.AllowedGroups) != 1 {
+		t.Fatalf("env: %v %q", err, c.AllowedGroups)
+	}
+}

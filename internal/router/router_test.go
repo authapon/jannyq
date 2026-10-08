@@ -997,3 +997,172 @@ func TestOnlyOneOfSimultaneousFirstMessagesIsGreeted(t *testing.T) {
 		t.Errorf("greetings = %d, want 1 (sent %q)", n, rec.all())
 	}
 }
+
+// The README explains --allowed-users by these rules.
+func TestAllowedUsersRules(t *testing.T) {
+	f := &fakeLLM{}
+	r := newRouter(t, f, Config{AllowedUsers: []string{" Telegram:42 ", "", "77", "LINE:UAbC"}})
+	ask := func(channel, user, text string, group, addressed bool) []string {
+		rec := &recorder{}
+		r.Handle(ctx, incomingFor(rec, channel, user, text, group, addressed))
+		return rec.all()
+	}
+	// "channel:id" matches on that channel only, a bare id on any, case is ignored
+	for _, tc := range []struct {
+		channel, user string
+		ok            bool
+	}{
+		{"telegram", "42", true}, {"discord", "42", false}, {"discord", "77", true}, {"telegram", "77", true},
+		{"line", "uabc", true}, {"telegram", "43", false}, {"web", "random", false},
+	} {
+		got := ask(tc.channel, tc.user, "hi", false, true)
+		refused := len(got) == 1 && strings.Contains(got[0], "not allowed")
+		if refused == tc.ok {
+			t.Errorf("%s:%s allowed=%v but replies = %q", tc.channel, tc.user, tc.ok, got)
+		}
+	}
+
+	// groups: an unlisted person who addresses the bot is refused; what they say
+	// to others is neither answered nor kept
+	calls := f.calls()
+	if got := ask("telegram", "43", "bot, help", true, true); len(got) != 1 || !strings.Contains(got[0], "not allowed") {
+		t.Errorf("addressed in a group: %q", got)
+	}
+	if got := ask("telegram", "43", "lunch at noon?", true, false); len(got) != 0 {
+		t.Errorf("chatter in a group got a reply: %q", got)
+	}
+	if f.calls() != calls {
+		t.Error("the model must not be called for an unlisted user")
+	}
+	r.Wait()
+	var texts []string
+	_ = r.sessions.With(ctx, "telegram", "g1", func(s *session.Session) error {
+		st, _ := s.Messages(ctx)
+		for _, m := range st {
+			texts = append(texts, m.Message.Content)
+		}
+		return nil
+	})
+	if len(texts) != 0 {
+		t.Errorf("kept from an unlisted user = %q", texts)
+	}
+	// a listed person's chatter is kept
+	if got := ask("telegram", "42", "anyone for lunch?", true, false); len(got) != 0 {
+		t.Errorf("chatter got a reply: %q", got)
+	}
+	r.Wait()
+	texts = nil
+	_ = r.sessions.With(ctx, "telegram", "g1", func(s *session.Session) error {
+		st, _ := s.Messages(ctx)
+		for _, m := range st {
+			texts = append(texts, m.Message.Content)
+		}
+		return nil
+	})
+	if len(texts) != 1 || texts[0] != "anyone for lunch?" {
+		t.Errorf("kept from a listed user = %q", texts)
+	}
+}
+
+func incomingFor(rec *recorder, ch, user, text string, group, addressed bool) channel.Incoming {
+	in := channel.Incoming{Channel: ch, ChatID: user, UserID: user, UserName: "U" + user, Text: text, Addressed: addressed, Responder: rec}
+	if group {
+		in.ChatID, in.IsGroup = "g1", true
+	}
+	return in
+}
+
+func TestAllowedUsersWithGroupReplyAll(t *testing.T) {
+	r := newRouter(t, &fakeLLM{}, Config{AllowedUsers: []string{"42"}, GroupReply: GroupReplyAll})
+	rec := &recorder{}
+	r.Handle(ctx, incomingFor(rec, "telegram", "43", "just chatting", true, false))
+	if got := rec.all(); len(got) != 1 || !strings.Contains(got[0], "not allowed") {
+		t.Errorf("replies = %q", got) // documented in the README
+	}
+}
+
+func TestAllowedGroups(t *testing.T) {
+	f := &fakeLLM{}
+	r := newRouter(t, f, Config{AllowedUsers: []string{"telegram:42"}, AllowedGroups: []string{" -1001 ", "discord:C9", "LINE:Cabc"}})
+	refused := func(got []string) bool { return len(got) == 1 && strings.Contains(got[0], "not allowed") }
+	say := func(channel, chat, user, text string, group, addressed bool) []string {
+		rec := &recorder{}
+		in := incomingFor(rec, channel, user, text, group, addressed)
+		in.ChatID = chat
+		r.Handle(ctx, in)
+		return rec.all()
+	}
+
+	// everybody in a listed group is answered, listed as a user or not
+	if got := say("telegram", "-1001", "999", "hello", true, true); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("stranger in a listed group: %q", got)
+	}
+	if got := say("discord", "C9", "999", "hello", true, true); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("channel:id form: %q", got)
+	}
+	if got := say("line", "cabc", "999", "hello", true, true); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("case is ignored: %q", got)
+	}
+	// "channel:id" is specific to its channel
+	if got := say("telegram", "C9", "999", "hello", true, true); !refused(got) {
+		t.Errorf("same id on another channel: %q", got)
+	}
+	// other groups: the user list still decides
+	if got := say("telegram", "-2002", "999", "hello", true, true); !refused(got) {
+		t.Errorf("stranger in another group: %q", got)
+	}
+	if got := say("telegram", "-2002", "42", "hello", true, true); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("listed user in another group: %q", got)
+	}
+	// a private chat is never covered by a group entry, even with the same id
+	if got := say("telegram", "-1001", "999", "hello", false, true); !refused(got) {
+		t.Errorf("private chat with a group's id: %q", got)
+	}
+
+	// what strangers say in a listed group is kept as context, without a reply
+	if got := say("telegram", "-1001", "888", "anyone for lunch?", true, false); len(got) != 0 {
+		t.Errorf("chatter got a reply: %q", got)
+	}
+	r.Wait()
+	var texts []string
+	_ = r.sessions.With(ctx, "telegram", "-1001", func(s *session.Session) error {
+		st, _ := s.Messages(ctx)
+		for _, m := range st {
+			texts = append(texts, m.Message.Content)
+		}
+		return nil
+	})
+	found := false
+	for _, x := range texts {
+		found = found || x == "anyone for lunch?"
+	}
+	if !found {
+		t.Errorf("chatter of a stranger in a listed group was not kept: %q", texts)
+	}
+}
+
+func TestAllowedGroupsAloneRestrictsToThoseGroups(t *testing.T) {
+	r := newRouter(t, &fakeLLM{}, Config{AllowedGroups: []string{"-1001"}})
+	rec := &recorder{}
+	r.Handle(ctx, incomingFor(rec, "telegram", "5", "hi", false, true)) // private chat
+	if got := rec.all(); len(got) != 1 || !strings.Contains(got[0], "not allowed") {
+		t.Errorf("private chat: %q", got)
+	}
+	rec = &recorder{}
+	in := incomingFor(rec, "telegram", "5", "hi", true, true)
+	in.ChatID = "-1001"
+	r.Handle(ctx, in)
+	if got := rec.all(); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("listed group: %q", got)
+	}
+
+	// with group-reply all, a listed group answers everyone without refusals
+	r = newRouter(t, &fakeLLM{}, Config{AllowedGroups: []string{"-1001"}, GroupReply: GroupReplyAll})
+	rec = &recorder{}
+	in = incomingFor(rec, "telegram", "6", "just chatting", true, false)
+	in.ChatID = "-1001"
+	r.Handle(ctx, in)
+	if got := rec.all(); len(got) != 1 || got[0] != "pong" {
+		t.Errorf("group-reply all in a listed group: %q", got)
+	}
+}

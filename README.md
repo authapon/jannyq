@@ -119,7 +119,8 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--messenger-page-token` / `-app-secret` / `-verify-token` | – | enable the Messenger channel ([notes](#messenger-and-whatsapp-notes)) |
 | `--whatsapp-token` / `-phone-number-id` / `-app-secret` / `-verify-token` | – | enable the WhatsApp channel |
 | `--cli` | `false` | enable the terminal channel |
-| `--allowed-users` | everyone | comma-separated user IDs or `channel:id` |
+| `--allowed-users` | everyone | comma-separated user IDs or `channel:id` — only these people get answers ([details and examples](#who-may-use-the-bot---allowed-users---allowed-groups)) |
+| `--allowed-groups` | – | comma-separated **group** IDs (or `channel:id`) where *everybody* gets answers, listed in `--allowed-users` or not ([details](#who-may-use-the-bot---allowed-users---allowed-groups)) |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
 | `--intro` | `true` | the first time the bot answers in a chat, the **model** introduces itself (it reads the system prompt, so it describes the tools and skills you configured, and writes in `--lang`); the introduction is saved in the history like any reply, costs one extra model call per chat, and `false` turns it off |
 | `--commands` | `true` | chat commands `/help`, `/reset`, `/compact`; `false` removes **all** slash commands: such text is just a message for the model, and the web chat hides its **New chat** button |
@@ -134,6 +135,141 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--web-run-rate` | `3` | `run_command` calls per address per minute from the web (`0` = off there, `-1` = use `--run-rate`) |
 | `--trusted-proxies` | – | IPs/CIDRs of reverse proxies whose `X-Forwarded-*` headers are believed |
 | `--http-rate` | `300` | HTTP requests per client address per minute |
+
+### Who may use the bot (`--allowed-users`, `--allowed-groups`)
+
+By default **anyone** who can reach the bot can talk to it (and, with `run_command` on, make it run sandboxed commands). Set
+`--allowed-users` (env `JANNYQ_ALLOWED_USERS`) to a comma-separated list to let only those people use it.
+
+**How entries are matched**
+
+| Entry | Matches |
+|---|---|
+| `123456789` | the user with that ID on **any** channel |
+| `telegram:123456789` | that ID on that channel only (`telegram`, `discord`, `line`, `messenger`, `whatsapp`, `cli`) |
+
+- Matching is exact and ignores upper/lower case. There are no wildcards and no ranges. Spaces around entries and empty entries are ignored.
+- It is a list of **people**, not of chats: a group is not "allowed" by this list; each person speaking in it is checked (to allow a whole group, see `--allowed-groups` below).
+- The check comes before the rate limit and before anything is stored or any model is called. Empty (the default) means everyone.
+- Prefer `channel:id` once you run several channels: a bare ID would also match an unrelated person whose ID on another platform happens to be the same.
+
+**What a user's ID is, per channel**
+
+| Channel | ID | Where to find it |
+|---|---|---|
+| Telegram | the numeric user ID, e.g. `123456789` (not the @username) | message `@userinfobot`, or look in the log (below) |
+| Discord | the user's snowflake ID, e.g. `80351110224678912` | *User Settings → Advanced → Developer Mode*, then right-click the user → *Copy User ID* |
+| LINE | the `U…` user ID (33 characters) | the log (below); LINE does not show it in the app |
+| Messenger | the page-scoped ID (PSID) of the sender | the log (below) |
+| WhatsApp | the phone number in international format **without `+`**, e.g. `66812345678` | the number itself |
+| Web chat | a random ID per visitor (cookie) | cannot be listed — see below |
+| CLI | `local` | – |
+
+**The easy way to find an ID:** start the bot, ask the person to send it one message, and read the log. A user who is not on the list
+produces
+
+```
+level=INFO msg="message from user that is not allowed" channel=telegram user=123456789
+```
+
+and gets the reply *"Sorry, you are not allowed to use this bot."* (in the bot's language). Copy `channel` and `user` into the list and restart.
+
+**Examples**
+
+```bash
+# 1. Only you, on Telegram (a private bot)
+JANNYQ_ALLOWED_USERS=telegram:123456789
+
+# 2. A family: three people on Telegram, one on WhatsApp
+JANNYQ_ALLOWED_USERS=telegram:123456789,telegram:987654321,telegram:555000111,whatsapp:66812345678
+
+# 3. The same person on several platforms: list each ID (they differ per platform)
+JANNYQ_ALLOWED_USERS=telegram:123456789,discord:80351110224678912,line:U4af4980629abcdef0123456789abcdef
+
+# 4. One channel only, and the IDs are unambiguous, so no prefix is needed
+JANNYQ_ALLOWED_USERS=123456789,987654321
+
+# 5. Everyone (the default) - leave it empty or unset
+JANNYQ_ALLOWED_USERS=
+
+# 6. As a flag
+jannyq --allowed-users telegram:123456789,discord:80351110224678912
+
+# 7. Terminal testing only: the CLI user is "local"
+JANNYQ_ALLOWED_USERS=cli:local
+```
+
+In `docker-compose.yml` / `.env` it is one line, without quotes or spaces needed:
+
+```env
+JANNYQ_ALLOWED_USERS=telegram:123456789,telegram:987654321
+```
+
+**Groups.** Only the listed people get answers in a group (unless the group itself is listed in `--allowed-groups`, below). If someone who is not listed mentions the bot there, the bot replies
+with the "not allowed" message to that person (it does not answer the question, and that message is not stored). What unlisted people
+say in the group *without* addressing the bot is **not kept either**: the model's picture of the conversation (`--group-context all`)
+contains only the listed people's messages, so it will not know what the others said. With `--group-reply all` the bot checks every message, so an unlisted member would receive the refusal for each
+message they write: use `--group-reply mention` (the default) in groups with unlisted members.
+
+**Whole groups (`--allowed-groups`).** Listing every member of a group in `--allowed-users` is tedious. `--allowed-groups`
+(env `JANNYQ_ALLOWED_GROUPS`) names **groups** instead: in a listed group the bot talks to and answers **everybody**, whether or not they are in
+`--allowed-users`, and keeps everything said there as context.
+
+- Entries are group chat IDs, written `id` (any channel) or `channel:id` (that channel only), compared exactly but ignoring case, like users.
+- The two lists **add up**: a message is answered if its sender is in `--allowed-users` **or** it was sent in a group in `--allowed-groups`.
+  Listed users are still answered everywhere (in private and in any other group); other groups are decided by `--allowed-users` as before.
+- A group entry never opens a *private* chat: a person who is only in a listed group cannot message the bot privately.
+- If you set `--allowed-groups` and leave `--allowed-users` empty, the bot answers **only inside the listed groups** (private chats are refused).
+  Only when **both** are empty is everyone answered.
+- It applies to groups only (Telegram groups and supergroups, Discord server channels, LINE groups and rooms). Messenger, WhatsApp and the web chat have
+  no groups.
+- The usual group rules still apply on top: with `--group-reply mention` (default) the bot answers only when mentioned or replied to; with
+  `--group-reply all` it answers every message of a listed group, and nobody there gets a refusal.
+
+| Channel | Group ID | Where to find it |
+|---|---|---|
+| Telegram | a negative number, e.g. `-1001234567890` (supergroups start with `-100`) | add the bot to the group and @mention it from an unlisted account: the log shows `chat=…`; or `@RawDataBot` |
+| Discord | the **channel** ID (each text channel is its own chat), e.g. `1098765432109876543` | *Developer Mode*, right-click the channel → *Copy Channel ID*; or the log |
+| LINE | the group ID `C…` (rooms: `R…`) | the log (below) |
+
+The easy way to get a group ID is the same as for users: mention the bot in the group before it is listed. The log line now carries the chat:
+
+```
+level=INFO msg="message from user that is not allowed" channel=telegram user=123456789 chat=-1001234567890 group=true
+```
+
+```bash
+# 8. Everybody in one Telegram group may use the bot; nobody else may (private chats are refused)
+JANNYQ_ALLOWED_GROUPS=telegram:-1001234567890
+
+# 9. You (anywhere) plus everybody in the family group
+JANNYQ_ALLOWED_USERS=telegram:123456789
+JANNYQ_ALLOWED_GROUPS=telegram:-1001234567890
+
+# 10. A team: two Telegram groups and one Discord channel, plus two admins who may also use it privately
+JANNYQ_ALLOWED_USERS=telegram:123456789,discord:80351110224678912
+JANNYQ_ALLOWED_GROUPS=telegram:-1001234567890,telegram:-1009876543210,discord:1098765432109876543
+
+# 11. As flags
+jannyq --allowed-users telegram:123456789 --allowed-groups telegram:-1001234567890
+```
+
+Being in a listed group is enough, so **anyone who can join that group can use the bot** (and, with `run_command` on, run sandboxed commands):
+keep such groups private or invite-only.
+
+**Other things to know**
+
+- **The web chat and the lists do not combine.** Web visitors get a random ID and are never in a group, so no list can name them: as soon as either list is not
+  empty, every web visitor is refused. To restrict the web chat use `--web-access-code` (everyone who knows the code may chat) instead,
+  or leave the web channel off.
+- **Webhook channels (LINE, Messenger, WhatsApp) still receive the message.** The refusal is sent back, but the signed webhook is accepted as
+  usual; the list controls who gets service, not who can reach the URL.
+- **Changing the list needs a restart** (it is read at start-up).
+- **It is not a login.** IDs are what the platform reports; the list is as safe as the platform's own account security. For sensitive
+  data also keep `run_command` (`--run-command=off`) and `--knowledge-dir` content in mind: anyone on the list can ask the bot about
+  the shared knowledge base.
+- **Combine it with the rest:** `--rate-limit` (per allowed user per minute), `--web-access-code` for the web chat, and a private bot
+  token (Telegram/Discord bots can be found by anyone, which is why the list is worth having).
 
 ### Telegram notes
 
@@ -244,6 +380,12 @@ Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask ab
   (reciprocal rank fusion) and vector matches below `--knowledge-min-similarity` are dropped. Without an embedding model — or while
   it is unreachable — search works by words only, and the answer says so. Good choices for Ollama: `bge-m3` (multilingual, Thai included)
   or the smaller `nomic-embed-text`. Changing `--embed-model` re-embeds the stored passages without re-reading the files.
+- **Built before the bot starts**: at start-up the bot first checks the whole folder and builds or updates the index — reading new and
+  changed files, forgetting deleted ones, embedding the passages, waiting for files that are still being copied — and only then starts
+  the channels and the web server. The log shows `still building the knowledge base` every 15 s. A big folder with OCR can take a long
+  while; `--knowledge-startup-sync=false` (`JANNYQ_KNOWLEDGE_STARTUP_SYNC=false`) builds it in the background instead, with the bot
+  answering from what is indexed so far. If the embedding model is unreachable the start is not blocked: those files are searchable by
+  words until the background scans embed them (a warning says how many).
 - **The index follows the folder**: every `--knowledge-interval` (30 s) the folder is scanned. New files are read, edited files are read again,
   deleted files are forgotten, a renamed file keeps its passages (found by content hash, no new embedding), a file touched without
   a change costs nothing, and a file that changed a moment ago waits until it has settled (so a copy in progress is not indexed half-way).

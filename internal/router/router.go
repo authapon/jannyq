@@ -45,8 +45,13 @@ type Config struct {
 	// CompactAfter is the message count above which a chat that only collects
 	// messages is summarised in the background; 0 disables that.
 	CompactAfter int
-	AllowedUsers []string // "id" or "channel:id"; empty allows everyone
-	GroupReply   string
+	// AllowedUsers ("id" or "channel:id") and AllowedGroups (group chat ids, same
+	// forms) restrict who is answered: a message passes if its sender is in the
+	// first list or the group it was sent in is in the second. When both are
+	// empty everyone is answered.
+	AllowedUsers  []string
+	AllowedGroups []string
+	GroupReply    string
 	// NoCommands turns the chat commands off: "/reset" and friends are
 	// ordinary text for the model.
 	NoCommands bool
@@ -68,9 +73,10 @@ type Router struct {
 	tr       *i18n.Translator
 	log      *slog.Logger
 
-	allowed map[string]bool
-	sem     chan struct{}
-	limiter *ratelimit.Limiter
+	allowed       map[string]bool
+	allowedGroups map[string]bool
+	sem           chan struct{}
+	limiter       *ratelimit.Limiter
 
 	resetWorkspace func(ctx context.Context, workspace string) error
 	attach         *attachState
@@ -100,7 +106,7 @@ func New(cfg Config, sessions *session.Manager, a *agent.Agent, tr *i18n.Transla
 	}
 	r := &Router{
 		cfg: cfg, sessions: sessions, agent: a, tr: tr, log: log,
-		allowed: map[string]bool{},
+		allowed: map[string]bool{}, allowedGroups: map[string]bool{},
 		sem:     make(chan struct{}, cfg.MaxConcurrent),
 		limiter: ratelimit.New(cfg.RateLimit, time.Minute),
 
@@ -110,6 +116,11 @@ func New(cfg Config, sessions *session.Manager, a *agent.Agent, tr *i18n.Transla
 	for _, u := range cfg.AllowedUsers {
 		if u = strings.TrimSpace(u); u != "" {
 			r.allowed[strings.ToLower(u)] = true
+		}
+	}
+	for _, g := range cfg.AllowedGroups {
+		if g = strings.TrimSpace(g); g != "" {
+			r.allowedGroups[strings.ToLower(g)] = true
 		}
 	}
 	return r
@@ -149,7 +160,8 @@ func (r *Router) Handle(ctx context.Context, in channel.Incoming) {
 	if !r.isAllowed(in) {
 		r.cfg.Metrics.MessagesRejected.Inc(in.Channel, "not_allowed")
 		accept()
-		r.log.Info("message from user that is not allowed", "channel", in.Channel, "user", in.UserID)
+		r.log.Info("message from user that is not allowed", "channel", in.Channel, "user", in.UserID,
+			"chat", in.ChatID, "group", in.IsGroup)
 		r.say(ctx, in, r.tr.T("not_allowed"))
 		return
 	}
@@ -320,8 +332,12 @@ func (r *Router) respond(ctx context.Context, s *session.Session, in channel.Inc
 }
 
 func (r *Router) isAllowed(in channel.Incoming) bool {
-	if len(r.allowed) == 0 {
+	if len(r.allowed) == 0 && len(r.allowedGroups) == 0 {
 		return true
+	}
+	if in.IsGroup && (r.allowedGroups[strings.ToLower(in.ChatID)] ||
+		r.allowedGroups[strings.ToLower(in.Channel+":"+in.ChatID)]) {
+		return true // everybody in a listed group
 	}
 	return r.allowed[strings.ToLower(in.UserID)] ||
 		r.allowed[strings.ToLower(in.Channel+":"+in.UserID)]

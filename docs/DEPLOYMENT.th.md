@@ -19,7 +19,7 @@
 
 ## 2. เช็กลิสต์ก่อนเปิดสาธารณะ
 
-- [ ] **ใครคุยได้บ้าง** `JANNYQ_ALLOWED_USERS` (ว่าง = ทุกคน), `JANNYQ_RATE_LIMIT`, และ `JANNYQ_WEB_ACCESS_CODE` สำหรับ web chat — เวลาของโมเดลคือทรัพยากรที่แพง
+- [ ] **ใครคุยได้บ้าง** `JANNYQ_ALLOWED_USERS` และ `JANNYQ_ALLOWED_GROUPS` (ว่างทั้งคู่ = ทุกคน), `JANNYQ_RATE_LIMIT`, และ `JANNYQ_WEB_ACCESS_CODE` สำหรับ web chat — เวลาของโมเดลคือทรัพยากรที่แพง
 - [ ] **คำสั่ง** ใช้ `JANNYQ_RUN_COMMAND=sandbox` เท่านั้น อย่าใช้ `host` นอกจากทดลองส่วนตัว และคง `JANNYQ_SANDBOX_NETWORK=off`
 - [ ] **ความลับ** สร้าง `JANNYQ_SANDBOX_TOKEN` ด้วย `openssl rand -hex 32` ใช้ไฟล์ (`..._FILE`) แทน environment variable เมื่อทำได้ และห้าม commit `.env`
 - [ ] **HTTPS** ช่องทาง webhook (LINE, Messenger, WhatsApp) และ web chat ผ่าน `docker-compose.public.yml` เท่านั้น มีแต่ Caddy ที่เปิดพอร์ต
@@ -41,6 +41,9 @@ docker compose up -d --build
 # เปิดสาธารณะ: ตั้ง JANNYQ_DOMAIN แล้ว
 docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
 ```
+
+ลำดับตอนเริ่ม: ระบบตรวจและสร้างฐานความรู้ให้เสร็จ **ก่อน** เปิดเว็บเซิร์ฟเวอร์และ channel (`JANNYQ_KNOWLEDGE_STARTUP_SYNC`) ดังนั้น `/healthz` จะยังไม่ตอบจนกว่าจะเสร็จ
+image ให้เวลา 2 นาที (`--start-period`) ถ้าโฟลเดอร์ใหญ่ให้เพิ่ม `start_period` ใน `healthcheck:` ของ compose (หรือตั้ง `JANNYQ_KNOWLEDGE_STARTUP_SYNC=false`) เพื่อไม่ให้คอนเทนเนอร์ถูกมองว่า unhealthy ระหว่างรอ
 
 ตรวจสถานะ: `/healthz` (โพรเซสทำงานอยู่) และ `/readyz` (เขียนโฟลเดอร์ข้อมูลได้และฐานความรู้ตอบ — ไม่ขึ้นกับโมเดลหรือแพลตฟอร์มอื่น)
 

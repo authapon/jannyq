@@ -142,23 +142,10 @@ func (ix *Indexer) ScanNow() {
 func (ix *Indexer) Run(ctx context.Context) {
 	for {
 		res, err := ix.Scan(ctx)
-		switch {
-		case ctx.Err() != nil:
+		if ctx.Err() != nil {
 			return
-		case err != nil:
-			ix.cfg.Metrics.KnowledgeScans.Inc("error")
-			ix.log.Error("scan failed", "dir", ix.cfg.Dir, "err", err)
-		case res.Changed():
-			for change, n := range map[string]int{"added": res.Added, "edited": res.Edited, "removed": res.Removed,
-				"renamed": res.Renamed, "failed": res.Failed, "embedded": res.Embedded} {
-				ix.cfg.Metrics.KnowledgeChanges.Add(float64(n), change)
-			}
-			ix.log.Info("knowledge base updated", "added", res.Added, "changed", res.Edited, "removed", res.Removed,
-				"renamed", res.Renamed, "failed", res.Failed, "files", res.Files)
 		}
-		if err == nil {
-			ix.cfg.Metrics.KnowledgeScans.Inc("ok")
-		}
+		ix.report(res, err, "knowledge base updated")
 		wait := ix.cfg.Interval
 		if res.Unsettled > 0 && ix.cfg.Settle+time.Second < wait {
 			wait = ix.cfg.Settle + time.Second // a file is still being written: look again soon
@@ -175,6 +162,84 @@ func (ix *Indexer) Run(ctx context.Context) {
 	}
 }
 
+// report counts a finished scan in the metrics and logs what it changed.
+func (ix *Indexer) report(res ScanResult, err error, msg string) {
+	switch {
+	case err != nil:
+		ix.cfg.Metrics.KnowledgeScans.Inc("error")
+		ix.log.Error("scan failed", "dir", ix.cfg.Dir, "err", err)
+		return
+	case res.Changed():
+		for change, n := range map[string]int{"added": res.Added, "edited": res.Edited, "removed": res.Removed,
+			"renamed": res.Renamed, "failed": res.Failed, "embedded": res.Embedded} {
+			ix.cfg.Metrics.KnowledgeChanges.Add(float64(n), change)
+		}
+		ix.log.Info(msg, "added", res.Added, "changed", res.Edited, "removed", res.Removed,
+			"renamed", res.Renamed, "failed", res.Failed, "files", res.Files)
+	}
+	ix.cfg.Metrics.KnowledgeScans.Inc("ok")
+}
+
+// maxSyncRounds bounds how often Sync waits for files that keep changing.
+const maxSyncRounds = 30
+
+// Sync brings the knowledge base fully up to date and returns when that is
+// done: it scans, and waits for files that were still being written to settle
+// and scans again. It is what runs before the bot starts. progress, if set, is
+// called every few seconds while files are being read. Files that cannot be
+// read are recorded as failed and do not stop it; passages that could not be
+// embedded (the embedding service is down) are searchable by words and left
+// to the background scans, which is counted in the result's Pending.
+func (ix *Indexer) Sync(ctx context.Context, every time.Duration, progress func(Progress)) (ScanResult, error) {
+	if progress != nil && every > 0 {
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		defer func() { close(stop); <-done }()
+		go func() {
+			defer close(done)
+			t := time.NewTicker(every)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					if p := ix.Progress(); p.Scanning {
+						progress(p)
+					}
+				}
+			}
+		}()
+	}
+	var total ScanResult
+	for round := 0; ; round++ {
+		res, err := ix.Scan(ctx)
+		if err != nil {
+			ix.report(res, err, "")
+			return total, err
+		}
+		ix.report(res, nil, "knowledge base built")
+		total.Added += res.Added
+		total.Edited += res.Edited
+		total.Removed += res.Removed
+		total.Renamed += res.Renamed
+		total.Failed += res.Failed
+		total.Embedded += res.Embedded
+		total.Files, total.Pending, total.Unsettled = res.Files, res.Pending, res.Unsettled
+		if res.Unsettled == 0 || round+1 >= maxSyncRounds {
+			return total, nil
+		}
+		ix.log.Info("waiting for files that are still being copied", "files", res.Unsettled)
+		t := time.NewTimer(ix.cfg.Settle + 250*time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return total, ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
 // ScanResult counts what a scan did.
 type ScanResult struct {
 	Files     int // files in the folder that are indexed
@@ -185,6 +250,7 @@ type ScanResult struct {
 	Failed    int // files that could not be read (with the reason stored)
 	Unsettled int // files skipped because they changed moments ago
 	Embedded  int // files whose passages were (re-)embedded without being re-read
+	Pending   int // files still without embeddings for the current model
 }
 
 // Changed reports whether the index changed.
@@ -336,6 +402,15 @@ func (ix *Indexer) Scan(ctx context.Context) (ScanResult, error) {
 	}
 	st, _ := ix.kb.Store.Stats(ctx)
 	res.Files = st.Files
+	if ix.kb.Embedder != nil && ix.kb.Model != "" {
+		if rows, err := ix.kb.Store.Files(ctx); err == nil {
+			for _, f := range rows {
+				if f.Status == "ok" && f.EmbedModel != ix.kb.Model {
+					res.Pending++
+				}
+			}
+		}
+	}
 	return res, nil
 }
 

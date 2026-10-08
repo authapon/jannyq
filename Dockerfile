@@ -32,7 +32,7 @@ ENV JANNYQ_SANDBOX_LISTEN=:9090 \
     JANNYQ_SANDBOX_WORKDIR=/work
 VOLUME ["/work"]
 EXPOSE 9090
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=3s --start-period=120s --retries=3 \
   CMD wget -qO- http://127.0.0.1:9090/healthz >/dev/null || exit 1
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/jannyq", "sandbox"]
 
@@ -51,6 +51,6 @@ ENV JANNYQ_DATA_DIR=/data \
     JANNYQ_LISTEN=:8080
 VOLUME ["/data", "/backups"]
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=3s --start-period=120s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/jannyq"]

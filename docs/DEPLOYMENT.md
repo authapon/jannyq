@@ -29,7 +29,7 @@ commands, and PDFs, which are untrusted input to a large parser, are read in the
 
 ## 2. Before you expose it: checklist
 
-- [ ] **Who may talk to it?** `JANNYQ_ALLOWED_USERS` (empty = everyone), `JANNYQ_RATE_LIMIT`, and for the web chat `JANNYQ_WEB_ACCESS_CODE`.
+- [ ] **Who may talk to it?** `JANNYQ_ALLOWED_USERS` and `JANNYQ_ALLOWED_GROUPS` (both empty = everyone), `JANNYQ_RATE_LIMIT`, and for the web chat `JANNYQ_WEB_ACCESS_CODE`.
   Model time is the expensive resource; an open bot on the internet will be used by strangers.
 - [ ] **Commands.** `JANNYQ_RUN_COMMAND=sandbox` only. Never `host` for anything but a private test. Keep `JANNYQ_SANDBOX_NETWORK=off`
   (the default) unless you have read `docker-compose.egress.yml`.
@@ -64,6 +64,10 @@ For public access: set `JANNYQ_DOMAIN` (DNS must point at the server, ports 80/4
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
 ```
+
+Start-up order: the knowledge base is checked and built **before** the web server and channels start (`JANNYQ_KNOWLEDGE_STARTUP_SYNC`),
+so `/healthz` does not answer until that is done. The images allow 2 minutes for it (`--start-period`); for a big folder raise
+`start_period` in a compose `healthcheck:` (or set `JANNYQ_KNOWLEDGE_STARTUP_SYNC=false`) so the container is not flagged unhealthy meanwhile.
 
 Health: `/healthz` (the process is up) and `/readyz` (the data directory is writable and the knowledge database answers; it does
 not depend on the model or on any platform, so an outage elsewhere does not restart the bot). Both are exempt from the rate limit.

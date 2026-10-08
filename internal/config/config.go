@@ -111,6 +111,7 @@ type Config struct {
 	EmbedBaseURL        string
 	EmbedAPIKey         string
 	KnowledgeInterval   time.Duration
+	KnowledgeSync       bool
 	KnowledgeChunkChars int
 	KnowledgeOverlap    int
 	KnowledgeResults    int
@@ -154,6 +155,7 @@ type Config struct {
 
 	// Access control and limits
 	AllowedUsers    []string
+	AllowedGroups   []string
 	GroupReply      string
 	GroupContext    string
 	RateLimit       int
@@ -273,7 +275,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	fs.SetOutput(stderr)
 	l := &loader{fs: fs, env: env, prefix: "JANNYQ_"}
 
-	var allowed, systemPromptFile, proxies, origins string
+	var allowed, allowedGroups, systemPromptFile, proxies, origins string
 
 	// General
 	l.str(&c.Lang, "lang", "en", "main language for messages and replies (en, th, ...)")
@@ -363,6 +365,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.str(&c.EmbedProvider, "embed-provider", "", "API of the embedding model: ollama or openai (default: --llm-provider)")
 	l.str(&c.EmbedBaseURL, "embed-base-url", "", "embedding API base URL (default: --llm-base-url)")
 	l.secret(&c.EmbedAPIKey, "embed-api-key", "API key for the embedding endpoint (default: --llm-api-key)")
+	l.boolean(&c.KnowledgeSync, "knowledge-startup-sync", true, "check and build the knowledge base completely before the bot starts (false: build it in the background while the bot already answers)")
 	l.duration(&c.KnowledgeInterval, "knowledge-interval", 30*time.Second, "how often the knowledge folder is scanned for changes")
 	l.integer(&c.KnowledgeChunkChars, "knowledge-chunk-chars", 1200, "size of a knowledge passage in characters")
 	l.integer(&c.KnowledgeOverlap, "knowledge-overlap", 150, "characters shared by neighbouring passages")
@@ -406,6 +409,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 
 	// Access control and limits
 	l.str(&allowed, "allowed-users", "", "comma-separated user IDs (or channel:id) allowed to chat; empty allows everyone")
+	l.str(&allowedGroups, "allowed-groups", "", "comma-separated group chat IDs (or channel:id) where everybody is answered, whether or not they are in --allowed-users")
 	l.str(&c.GroupReply, "group-reply", "mention", "reply in groups: mention (only when addressed) or all")
 	l.str(&c.GroupContext, "group-context", "all", "what the bot remembers of groups: all (every message, so it knows who said what) or addressed (only messages for the bot)")
 	l.integer(&c.RateLimit, "rate-limit", 20, "messages per user per minute; 0 = unlimited")
@@ -429,6 +433,7 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 			c.AllowedUsers = append(c.AllowedUsers, u)
 		}
 	}
+	c.AllowedGroups = splitList(allowedGroups)
 	if systemPromptFile != "" {
 		b, err := os.ReadFile(systemPromptFile)
 		if err != nil {

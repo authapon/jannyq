@@ -113,6 +113,32 @@ func newKnowledge(ctx context.Context, cfg *config.Config, cr *commandRunner, in
 	return &knowledgeBase{kb: kb, ix: ix, store: store}, nil
 }
 
+// syncAtStart builds and updates the knowledge base before anything else runs,
+// so that the bot never answers from a half-built one. It returns an error only
+// when ctx ends; a folder that cannot be scanned is logged and left to the
+// background scans.
+func (k *knowledgeBase) syncAtStart(ctx context.Context, log *slog.Logger) error {
+	log.Info("checking and building the knowledge base before the bot starts")
+	start := time.Now()
+	res, err := k.ix.Sync(ctx, 15*time.Second, func(p knowledge.Progress) {
+		log.Info("still building the knowledge base", "files_done", p.Done, "files_to_do", p.Total)
+	})
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		log.Error("the knowledge base could not be built; the bot starts anyway and will retry in the background", "err", err)
+		return nil
+	}
+	log.Info("knowledge base ready", "files", res.Files, "added", res.Added, "changed", res.Edited,
+		"removed", res.Removed, "failed", res.Failed, "took", time.Since(start).Round(time.Millisecond))
+	if res.Pending > 0 {
+		log.Warn("some files are not embedded yet (is the embedding model reachable?): they are searched by words until the background scans embed them",
+			"files", res.Pending)
+	}
+	return nil
+}
+
 // register adds the knowledge tools.
 func (k *knowledgeBase) register(tools *tool.Registry, cfg *config.Config) {
 	tools.Register(&tool.KnowledgeSearch{KB: k.kb, Indexer: k.ix, DefaultResults: cfg.KnowledgeResults})

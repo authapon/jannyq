@@ -27,9 +27,16 @@ type bagEmbedder struct {
 	texts  int
 	models []string
 	fail   bool
+	gate   chan struct{} // when set, Embed waits for it to be closed
 }
 
 func (b *bagEmbedder) Embed(_ context.Context, model string, in []string) ([][]float32, error) {
+	b.mu.Lock()
+	gate := b.gate
+	b.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls++
@@ -549,4 +556,96 @@ func TestLongThaiMarkdownIsIndexedAndBinaryDataGetsAClearReason(t *testing.T) {
 			t.Errorf("%s: %s", f.Path, f.Error)
 		}
 	}
+}
+
+func TestSyncBuildsEverythingBeforeReturning(t *testing.T) {
+	r := newRig(t, true)
+	for i := 0; i < 5; i++ {
+		r.write(fmt.Sprintf("doc%d.txt", i), fmt.Sprintf("document number %d about pangolins", i))
+	}
+	var seen []Progress
+	res, err := r.ix.Sync(bg, time.Hour, func(p Progress) { seen = append(seen, p) })
+	if err != nil || res.Added != 5 || res.Files != 5 || res.Pending != 0 {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+	// everything is searchable the moment Sync returns, by meaning too
+	found, err := r.kb.Search(bg, "pangolins", 10)
+	if err != nil || len(found.Hits) == 0 || !found.Semantic {
+		t.Errorf("found = %+v, err = %v", found, err)
+	}
+	if _, texts := r.emb.count(); texts == 0 {
+		t.Error("nothing was embedded")
+	}
+	// a second sync has nothing to do
+	if res, _ = r.ix.Sync(bg, time.Hour, nil); res.Changed() {
+		t.Errorf("second sync: %+v", res)
+	}
+}
+
+func TestSyncWaitsForFilesStillBeingCopied(t *testing.T) {
+	r := newRig(t, false)
+	r.ix.now = time.Now
+	r.ix.cfg.Settle = 300 * time.Millisecond
+	p := filepath.Join(r.dir, "fresh.txt")
+	if err := os.WriteFile(p, []byte("just copied in"), 0o644); err != nil { // modified right now
+		t.Fatal(err)
+	}
+	start := time.Now()
+	res, err := r.ix.Sync(bg, time.Hour, nil)
+	if err != nil || res.Added != 1 || res.Unsettled != 0 {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+	if time.Since(start) < 250*time.Millisecond {
+		t.Error("Sync returned before the file had settled")
+	}
+}
+
+func TestSyncCarriesOnWhenEmbeddingIsDown(t *testing.T) {
+	r := newRig(t, true)
+	r.emb.fail = true
+	r.write("a.txt", "wombats are marsupials")
+	res, err := r.ix.Sync(bg, time.Hour, nil)
+	if err != nil || res.Added != 1 || res.Pending != 1 {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+	if found, _ := r.kb.Search(bg, "wombats", 5); len(found.Hits) == 0 {
+		t.Error("a file that could not be embedded must still be searchable by words")
+	}
+}
+
+func TestSyncStopsWhenCancelled(t *testing.T) {
+	r := newRig(t, false)
+	r.write("a.txt", "x y z")
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	if _, err := r.ix.Sync(ctx, time.Hour, nil); err == nil {
+		t.Error("a cancelled sync must report it")
+	}
+}
+
+func TestSyncReportsProgress(t *testing.T) {
+	r := newRig(t, true)
+	for i := 0; i < 3; i++ {
+		r.write(fmt.Sprintf("d%d.txt", i), fmt.Sprintf("passage number %d about quokkas and other small marsupials", i))
+	}
+	block := make(chan struct{})
+	r.emb.gate = block
+	got := make(chan Progress, 4)
+	go func() {
+		_, _ = r.ix.Sync(bg, 20*time.Millisecond, func(p Progress) {
+			select {
+			case got <- p:
+			default:
+			}
+		})
+	}()
+	select {
+	case p := <-got:
+		if !p.Scanning || p.Total != 3 {
+			t.Errorf("progress = %+v", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("no progress reported while files were being embedded")
+	}
+	close(block)
 }

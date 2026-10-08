@@ -136,6 +136,11 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	if kbase != nil {
 		defer kbase.store.Close()
 		kbase.register(tools, cfg)
+		if cfg.KnowledgeSync {
+			if err := kbase.syncAtStart(ctx, log); err != nil {
+				return nil // interrupted while building: nothing has started yet
+			}
+		}
 	}
 
 	var temp *float64
@@ -189,6 +194,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 	tr := i18n.New(cfg.Lang)
 	rt := router.New(router.Config{
 		AllowedUsers:   cfg.AllowedUsers,
+		AllowedGroups:  cfg.AllowedGroups,
 		GroupReply:     cfg.GroupReply,
 		NoCommands:     !cfg.Commands,
 		Intro:          cfg.Intro,
