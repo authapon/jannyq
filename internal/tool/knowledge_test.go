@@ -181,3 +181,85 @@ func TestKnowledgeRetrieve(t *testing.T) {
 		t.Errorf("no match must give nothing: %q %v", out, err)
 	}
 }
+
+// A list that runs across the boundary between two passages must not be answered
+// with its first half (PLO1-5 of PLO1-9 in a real curriculum).
+func TestSearchAddsThePassageThatFollowsTheBestHits(t *testing.T) {
+	kb := testKB(t)
+	ctx := context.Background()
+	if err := kb.Store.Replace(ctx, knowledge.File{Path: "curriculum.md", Size: 1, MtimeNS: 1, Kind: "text"}, []knowledge.EmbeddedChunk{
+		{Chunk: knowledge.Chunk{Text: "Intro of the curriculum."}},
+		{Chunk: knowledge.Chunk{Text: "Learning outcomes (PLOs): PLO1 maths. PLO2 economics. PLO3 programs. PLO4 systems. PLO5 analysis."}},
+		{Chunk: knowledge.Chunk{Text: "PLO6 communication. PLO7 research. PLO8 ethics. PLO9 work placement."}},
+		{Chunk: knowledge.Chunk{Text: "Admission rules."}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	k := &KnowledgeSearch{KB: kb}
+	out, err := k.Execute(context.Background(), CallContext{}, []byte(`{"query":"learning outcomes PLOs"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"curriculum.md (passage 2 of 4)",
+		"[1, continued] curriculum.md (passage 3 of 4)",
+		"PLO9 work placement",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	// the prefetch for models without tools carries the continuation too
+	pre, err := k.Retrieve(context.Background(), "learning outcomes PLOs")
+	if err != nil || !strings.Contains(pre, "PLO9 work placement") {
+		t.Errorf("prefetch lacks the continuation: %v\n%s", err, pre)
+	}
+	// a continuation that is already a hit is not repeated
+	out, _ = k.Execute(context.Background(), CallContext{}, []byte(`{"query":"PLO"}`))
+	if strings.Count(out, "PLO9 work placement") != 1 {
+		t.Errorf("the same passage twice:\n%s", out)
+	}
+	// the last passage of a file has no continuation
+	out, _ = k.Execute(context.Background(), CallContext{}, []byte(`{"query":"admission rules"}`))
+	if strings.Contains(out, "continued") {
+		t.Errorf("nothing follows the last passage:\n%s", out)
+	}
+}
+
+func TestKnowledgeRead(t *testing.T) {
+	kb := testKB(t)
+	ctx := context.Background()
+	if err := kb.Store.Replace(ctx, knowledge.File{Path: "book.txt", Size: 1, MtimeNS: 1, Kind: "text"}, []knowledge.EmbeddedChunk{
+		{Chunk: knowledge.Chunk{Text: "first part"}}, {Chunk: knowledge.Chunk{Text: "second part"}},
+		{Chunk: knowledge.Chunk{Text: "third part"}}, {Chunk: knowledge.Chunk{Text: "fourth part"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := &KnowledgeRead{KB: kb}
+	run := func(args string) (string, error) { return r.Execute(ctx, CallContext{}, []byte(args)) }
+
+	out, err := run(`{"path":"book.txt","from":2,"count":2}`)
+	if err != nil || !strings.Contains(out, "[2] book.txt (passage 2 of 4)\nsecond part") || !strings.Contains(out, "[3] book.txt (passage 3 of 4)\nthird part") ||
+		strings.Contains(out, "fourth part") || !strings.Contains(out, "next is passage 4 of 4") {
+		t.Errorf("%v\n%s", err, out)
+	}
+	// defaults: from the start, two passages
+	if out, _ = run(`{"path":"book.txt"}`); !strings.Contains(out, "first part") || !strings.Contains(out, "second part") || strings.Contains(out, "third part") {
+		t.Errorf("defaults:\n%s", out)
+	}
+	if out, _ = run(`{"path":"book.txt","from":4,"count":9}`); !strings.Contains(out, "fourth part") || !strings.Contains(out, "end of the document") {
+		t.Errorf("the end:\n%s", out)
+	}
+	if out, _ = run(`{"path":"book.txt","from":9}`); !strings.Contains(out, "ends before that") {
+		t.Errorf("past the end:\n%s", out)
+	}
+	for _, bad := range []string{`{"path":"nope.txt"}`, `{"path":"bad.pdf"}`, `{"path":""}`, `not json`} {
+		if _, err := run(bad); err == nil {
+			t.Errorf("%s should be refused", bad)
+		}
+	}
+	// a long count is capped
+	if out, _ = run(`{"path":"book.txt","count":100}`); strings.Count(out, "\n[") > 5 {
+		t.Errorf("not capped:\n%s", out)
+	}
+}

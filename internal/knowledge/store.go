@@ -280,6 +280,40 @@ func (s *Store) Chunks(ctx context.Context, fileID int64) ([]StoredChunk, error)
 	return out, rows.Err()
 }
 
+// ErrNoFile is returned for a path that is not in the knowledge base.
+var ErrNoFile = errors.New("knowledge: no such file")
+
+// Passages returns count passages of a file in order, starting at the 0-based
+// passage from. It is how a reader follows a list or a section across the
+// boundary between two passages.
+func (s *Store) Passages(ctx context.Context, path string, from, count int) ([]Hit, error) {
+	var id int64
+	var kind string
+	var total int
+	err := s.db.QueryRowContext(ctx, `SELECT id, kind, chunks FROM files WHERE path = ? AND status = 'ok'`, path).Scan(&id, &kind, &total)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNoFile
+	}
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, page, ord, text FROM chunks WHERE file_id = ? AND ord >= ? ORDER BY ord LIMIT ?`,
+		id, max(from, 0), count)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Hit
+	for rows.Next() {
+		h := Hit{Path: path, Kind: kind, Total: total}
+		if err := rows.Scan(&h.ChunkID, &h.Page, &h.Ord, &h.Text); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // Opening returns the beginning of the first passage of a file, or "" when
 // there is none: enough to tell what a document is about.
 func (s *Store) Opening(ctx context.Context, fileID int64) (string, error) {
@@ -398,7 +432,8 @@ type Hit struct {
 	Path    string
 	Kind    string
 	Page    int
-	Ord     int
+	Ord     int // 0-based position of the passage in its file
+	Total   int // passages in the file
 	Text    string
 	Score   float64 // fused rank score; higher is better
 	Cosine  float64 // similarity to the query when it was embedded; 0 otherwise
@@ -501,7 +536,7 @@ func (s *Store) loadHits(ctx context.Context, ids []int64) ([]Hit, error) {
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT c.id, f.path, f.kind, c.page, c.ord, c.text
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id, f.path, f.kind, c.page, c.ord, f.chunks, c.text
 		FROM chunks c JOIN files f ON f.id = c.file_id WHERE c.id IN (`+marks+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -510,7 +545,7 @@ func (s *Store) loadHits(ctx context.Context, ids []int64) ([]Hit, error) {
 	byID := map[int64]Hit{}
 	for rows.Next() {
 		var h Hit
-		if err := rows.Scan(&h.ChunkID, &h.Path, &h.Kind, &h.Page, &h.Ord, &h.Text); err != nil {
+		if err := rows.Scan(&h.ChunkID, &h.Path, &h.Kind, &h.Page, &h.Ord, &h.Total, &h.Text); err != nil {
 			return nil, err
 		}
 		byID[h.ChunkID] = h

@@ -371,7 +371,7 @@ Things to know:
 ## Knowledge base
 
 Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask about its documents. The model calls
-`knowledge_search` (passages with file names and pages) and `knowledge_files` (what is there), then answers and names its sources.
+`knowledge_search` (passages with file names and pages), `knowledge_read` (read on from a passage) and `knowledge_files` (what is there), then answers and names its sources.
 
 - **Files**: PDF (including scans, by OCR in the sandbox), `txt md rst csv tsv json jsonl xml yaml toml ini log srt vtt tex`.
   Sub-folders are read; hidden files and folders, symbolic links, and other file types are ignored.
@@ -380,6 +380,12 @@ Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask ab
   (reciprocal rank fusion) and vector matches below `--knowledge-min-similarity` are dropped. Without an embedding model — or while
   it is unreachable — search works by words only, and the answer says so. Good choices for Ollama: `bge-m3` (multilingual, Thai included)
   or the smaller `nomic-embed-text`. Changing `--embed-model` re-embeds the stored passages without re-reading the files.
+- **Lists and sections that run across two passages**: documents are cut into passages of about `--knowledge-chunk-chars` (1200)
+  characters, so a list can end up half in one passage and half in the next (a curriculum's nine learning outcomes, say, with the model
+  answering with the first five). Search results therefore say where each passage sits (`passage 44 of 487`) and the **passage that
+  follows each of the two best hits is added automatically** (`[1, continued]`). The model also has `knowledge_read` to read a document
+  on from any passage number, and is told to do so whenever a list or table is still cut off. A larger `--knowledge-chunk-chars`
+  (say 2000) makes such splits rarer at the cost of less precise matches.
 - **How the model is made to use it**: the system prompt lists the documents (file name plus the first lines of each, as a title) and
   tells the model to call `knowledge_search` *first* for anything those documents could cover, or for terms it does not recognise. A
   model told only "there is a knowledge base" often answers from memory instead. Some models cannot call tools at all (the log says

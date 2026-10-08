@@ -143,4 +143,5 @@ func (k *knowledgeBase) syncAtStart(ctx context.Context, log *slog.Logger) error
 func (k *knowledgeBase) register(tools *tool.Registry, cfg *config.Config) {
 	tools.Register(&tool.KnowledgeSearch{KB: k.kb, Indexer: k.ix, DefaultResults: cfg.KnowledgeResults})
 	tools.Register(&tool.KnowledgeFiles{KB: k.kb})
+	tools.Register(&tool.KnowledgeRead{KB: k.kb})
 }
