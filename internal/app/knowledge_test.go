@@ -117,3 +117,25 @@ func TestSyncAtStartBuildsTheWholeKnowledgeBase(t *testing.T) {
 		t.Error("an interrupted start-up must say so")
 	}
 }
+
+func TestProviderFollowsTheThinkingSetting(t *testing.T) {
+	cfg := func(provider, thinking string) *config.Config {
+		return &config.Config{LLMProvider: provider, LLMBaseURL: "http://x", Thinking: thinking, ExtraBody: map[string]any{"a": 1}}
+	}
+	for thinking, want := range map[string]*bool{"auto": nil, "off": ptrBool(false), "on": ptrBool(true)} {
+		p, err := NewProvider(cfg("ollama", thinking))
+		o := p.(*llm.Ollama)
+		if err != nil || (o.Think == nil) != (want == nil) || (want != nil && *o.Think != *want) || o.ExtraBody["a"] != 1 {
+			t.Errorf("ollama %s: %+v %v", thinking, o, err)
+		}
+	}
+	for thinking, want := range map[string]string{"auto": "", "on": "", "off": "none"} {
+		p, err := NewProvider(cfg("openai", thinking))
+		o := p.(*llm.OpenAI)
+		if err != nil || o.ReasoningEffort != want || o.ExtraBody["a"] != 1 {
+			t.Errorf("openai %s: %+v %v", thinking, o, err)
+		}
+	}
+}
+
+func ptrBool(b bool) *bool { return &b }

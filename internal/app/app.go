@@ -50,9 +50,22 @@ func NewProvider(cfg *config.Config) (llm.Provider, error) {
 	client := &http.Client{Timeout: cfg.LLMTimeout}
 	switch cfg.LLMProvider {
 	case "ollama":
-		return &llm.Ollama{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Client: client}, nil
+		o := &llm.Ollama{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Client: client, ExtraBody: cfg.ExtraBody}
+		switch cfg.Thinking {
+		case "off":
+			off := false
+			o.Think = &off
+		case "on":
+			on := true
+			o.Think = &on
+		}
+		return o, nil
 	case "openai":
-		return &llm.OpenAI{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Client: client}, nil
+		o := &llm.OpenAI{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, Client: client, ExtraBody: cfg.ExtraBody}
+		if cfg.Thinking == "off" {
+			o.ReasoningEffort = "none"
+		}
+		return o, nil
 	}
 	return nil, fmt.Errorf("unknown llm provider %q", cfg.LLMProvider)
 }
@@ -323,7 +336,7 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 
 	log.Info("jannyq starting",
 		"version", version, "model", cfg.LLMModel, "provider", cfg.LLMProvider,
-		"context_size", cfg.ContextSize, "lang", cfg.Lang, "timezone", loc.String(), "group_context", cfg.GroupContext,
+		"thinking", cfg.Thinking, "context_size", cfg.ContextSize, "lang", cfg.Lang, "timezone", loc.String(), "group_context", cfg.GroupContext,
 		"tools", tools.Len(), "run_command", cfg.RunCommand, "channels", len(channels), "data_dir", cfg.DataDir)
 
 	runCtx, cancel := context.WithCancel(ctx)

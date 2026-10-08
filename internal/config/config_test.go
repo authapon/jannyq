@@ -502,3 +502,30 @@ func TestAllowedGroupsAreParsed(t *testing.T) {
 		t.Fatalf("env: %v %q", err, c.AllowedGroups)
 	}
 }
+
+func TestThinkingAndExtraBody(t *testing.T) {
+	model := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	c, err := load(t, nil, model)
+	if err != nil || c.Thinking != "auto" || c.ExtraBody != nil {
+		t.Fatalf("defaults: %v %q %v", err, c.Thinking, c.ExtraBody)
+	}
+	for _, v := range []string{"off", "ON", " auto "} {
+		c, err = load(t, []string{"--thinking", v}, model)
+		if err != nil || c.Thinking != strings.ToLower(strings.TrimSpace(v)) {
+			t.Errorf("--thinking %q: %v %q", v, err, c.Thinking)
+		}
+	}
+	if _, err = load(t, []string{"--thinking", "false"}, model); err == nil || !strings.Contains(err.Error(), "--thinking") {
+		t.Errorf("a bad value must be refused, err = %v", err)
+	}
+	c, err = load(t, nil, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_THINKING": "off",
+		"JANNYQ_LLM_EXTRA_BODY": `{"chat_template_kwargs":{"enable_thinking":false}}`})
+	if err != nil || c.Thinking != "off" || c.ExtraBody["chat_template_kwargs"] == nil {
+		t.Fatalf("env: %v %q %v", err, c.Thinking, c.ExtraBody)
+	}
+	for _, bad := range []string{`not json`, `[1,2]`, `"text"`, `null`} {
+		if _, err := load(t, []string{"--llm-extra-body", bad}, model); err == nil || !strings.Contains(err.Error(), "--llm-extra-body") {
+			t.Errorf("%s must be refused, err = %v", bad, err)
+		}
+	}
+}

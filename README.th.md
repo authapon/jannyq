@@ -243,6 +243,20 @@ jannyq --allowed-users telegram:123456789 --allowed-groups telegram:-10012345678
 ถ้าโมเดลปฏิเสธ tools ระบบจะบันทึกคำเตือนและคุยต่อโดยไม่ใช้ tools
 และควรตั้ง `--context-size` เสมอเมื่อใช้ Ollama เพราะค่าเริ่มต้นของ Ollama เล็กมาก
 
+**โมเดลที่คิดก่อนตอบ (thinking/reasoning)** เช่น qwen3, deepseek-r1, gpt-oss จะใช้เวลาคิดก่อนตอบ ทำให้ตอบแชทช้า `--thinking` (env `JANNYQ_THINKING`)
+ควบคุมทุกคำขอไปยังโมเดล (คำตอบ ข้อความแนะนำตัว การสรุปประวัติ):
+
+| `--thinking` | Ollama (`--llm-provider ollama`) | OpenAI-compatible (`openai`) |
+|---|---|---|
+| `auto` (ค่าเริ่มต้น) | ไม่ส่งอะไร โมเดลตัดสินเอง | ไม่ส่งอะไร |
+| `off` | `"think": false` | `"reasoning_effort": "none"` |
+| `on` | `"think": true` (ส่วนที่คิดไม่ปนในคำตอบ) | ไม่ส่งอะไร |
+
+โมเดลที่คิดไม่ได้จะปฏิเสธ `think: true` ระบบจะถามใหม่โดยไม่ใส่และจำไว้ สำหรับเซิร์ฟเวอร์ OpenAI-compatible ที่ปิดการคิดด้วยวิธีอื่น ใช้ `--llm-extra-body`
+(env `JANNYQ_LLM_EXTRA_BODY`) เพิ่ม JSON ใด ๆ เข้าทุกคำขอ เช่น vLLM และ llama.cpp: `--llm-extra-body '{"chat_template_kwargs":{"enable_thinking":false}}'`
+Ollama: `'{"keep_alive":"30m"}'` (`options` จะถูกรวมกับที่ jannyq ตั้ง และของคุณชนะ) ข้อควรระวัง `reasoning_effort` ถูกปฏิเสธโดยโมเดลที่ไม่ใช่โมเดลคิด (เช่น `gpt-4o`)
+และเซิร์ฟเวอร์บางตัว ถ้าโมเดลตอบ HTTP 400 ให้ปล่อย `--thinking` เป็น `auto` แล้วใช้ `--llm-extra-body` ตามเซิร์ฟเวอร์ของคุณแทน
+
 ## บริบทของบทสนทนา: เวลาและชื่อ
 
 ทุกข้อความของผู้ใช้ถูกส่งให้โมเดลพร้อม header:

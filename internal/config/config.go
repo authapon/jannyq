@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,13 +35,16 @@ type Config struct {
 	LogJSON  bool
 
 	// Model
-	LLMProvider string
-	LLMBaseURL  string
-	LLMAPIKey   string
-	LLMModel    string
-	ContextSize int
-	Temperature float64 // negative = provider default
-	LLMTimeout  time.Duration
+	LLMProvider  string
+	LLMBaseURL   string
+	LLMAPIKey    string
+	LLMModel     string
+	ContextSize  int
+	Temperature  float64 // negative = provider default
+	LLMTimeout   time.Duration
+	Thinking     string
+	LLMExtraBody string
+	ExtraBody    map[string]any
 
 	// Conversation
 	CompactAfter  int
@@ -296,6 +300,8 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.str(&c.LLMModel, "llm-model", "", "model name (required)")
 	l.integer(&c.ContextSize, "context-size", 0, "context window of the model in tokens; 0 = unknown (sent to Ollama as num_ctx)")
 	l.float(&c.Temperature, "llm-temperature", -1, "sampling temperature; negative = model default")
+	l.str(&c.Thinking, "thinking", "auto", "reasoning (\"thinking\") of the model: auto (the model's default), off, or on (Ollama only: think=true)")
+	l.str(&c.LLMExtraBody, "llm-extra-body", "", "JSON object added to every chat request, e.g. '{\"chat_template_kwargs\":{\"enable_thinking\":false}}' for vLLM or llama.cpp")
 	l.duration(&c.LLMTimeout, "llm-timeout", 5*time.Minute, "timeout of a single model call")
 
 	// Conversation
@@ -653,6 +659,16 @@ func (c *Config) validate() error {
 	}
 	if c.WebMaxUploadMB < 1 || c.WebMaxFiles < 1 {
 		bad("--web-max-upload-mb and --web-max-files must be at least 1")
+	}
+	switch c.Thinking = strings.ToLower(strings.TrimSpace(c.Thinking)); c.Thinking {
+	case "auto", "on", "off":
+	default:
+		bad("--thinking must be auto, on or off")
+	}
+	if x := strings.TrimSpace(c.LLMExtraBody); x != "" {
+		if err := json.Unmarshal([]byte(x), &c.ExtraBody); err != nil || c.ExtraBody == nil {
+			bad("--llm-extra-body must be a JSON object")
+		}
 	}
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":

@@ -336,6 +336,21 @@ The model must support **tool calling** for `web_search`/`web_fetch` to work (fo
 mistral-nemo, …). If a model rejects tools, jannyq logs a warning and keeps chatting without them.
 Always set `--context-size` for Ollama: its default context is small and long pages would be silently cut.
 
+**Thinking (reasoning) models** (qwen3, deepseek-r1, gpt-oss, …) reason before they answer, which makes a chat reply slow. `--thinking`
+(env `JANNYQ_THINKING`) controls it for every model call (answers, introductions, summaries):
+
+| `--thinking` | Ollama (`--llm-provider ollama`) | OpenAI-compatible (`openai`) |
+|---|---|---|
+| `auto` (default) | nothing is sent: the model decides | nothing is sent |
+| `off` | `"think": false` | `"reasoning_effort": "none"` |
+| `on` | `"think": true` (the reasoning is kept out of the answer) | nothing is sent |
+
+A model that cannot think refuses `think: true`; jannyq then asks again without it and remembers that (the user sees no error). For OpenAI-compatible servers
+that switch reasoning off some other way, `--llm-extra-body` (env `JANNYQ_LLM_EXTRA_BODY`) adds any JSON object to every chat request, e.g.
+vLLM and llama.cpp: `--llm-extra-body '{"chat_template_kwargs":{"enable_thinking":false}}'`; Ollama: `'{"keep_alive":"30m"}'` (its `options` are
+merged with the ones jannyq sets, yours win). Note that `reasoning_effort` is rejected by models that do not reason (e.g. `gpt-4o`) and by some
+servers: if the model answers with an HTTP 400, leave `--thinking` on `auto` and use `--llm-extra-body` for your server instead.
+
 ## Pictures, PDFs and text files
 
 Send a photo, a PDF or a text file (with or without a caption) and the model reads it. What happens to each:

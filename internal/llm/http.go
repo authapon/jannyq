@@ -95,3 +95,36 @@ func doPost(ctx context.Context, client *http.Client, url string, headers map[st
 	}
 	return nil
 }
+
+// withExtra returns body with the fields of extra added at the top level; a
+// field of extra replaces one of the same name, except "options", whose entries
+// are merged into the body's own (Ollama keeps its model settings there). With
+// no extra fields body is returned as it is.
+func withExtra(body any, extra map[string]any) (any, error) {
+	if len(extra) == 0 {
+		return body, nil
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]any{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	for k, v := range extra {
+		if opts, ok := v.(map[string]any); ok && k == "options" {
+			merged, _ := m[k].(map[string]any)
+			if merged == nil {
+				merged = map[string]any{}
+			}
+			for ok, ov := range opts {
+				merged[ok] = ov
+			}
+			m[k] = merged
+			continue
+		}
+		m[k] = v
+	}
+	return m, nil
+}

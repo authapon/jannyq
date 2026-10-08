@@ -15,6 +15,12 @@ type OpenAI struct {
 	BaseURL string // e.g. https://api.openai.com/v1
 	APIKey  string
 	Client  *http.Client
+	// ReasoningEffort, when set, is sent as reasoning_effort ("none" switches
+	// reasoning off on the servers that support it). ExtraBody holds further
+	// fields added to every chat request (see withExtra), for servers with their
+	// own switch, e.g. {"chat_template_kwargs":{"enable_thinking":false}}.
+	ReasoningEffort string
+	ExtraBody       map[string]any
 }
 
 type oaiMessage struct {
@@ -61,6 +67,7 @@ type oaiRequest struct {
 	Tools       []oaiTool    `json:"tools,omitempty"`
 	Temperature *float64     `json:"temperature,omitempty"`
 	Stream      bool         `json:"stream"`
+	Reasoning   string       `json:"reasoning_effort,omitempty"`
 }
 
 type oaiResponse struct {
@@ -119,6 +126,7 @@ func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		Model:       req.Model,
 		Messages:    toOAIMessages(req.Messages),
 		Temperature: req.Temperature,
+		Reasoning:   o.ReasoningEffort,
 	}
 	for _, t := range req.Tools {
 		var ot oaiTool
@@ -134,7 +142,11 @@ func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	var resp oaiResponse
 	url := strings.TrimRight(o.BaseURL, "/") + "/chat/completions"
-	if err := postJSON(ctx, o.Client, url, headers, body, &resp); err != nil {
+	payload, err := withExtra(body, o.ExtraBody)
+	if err != nil {
+		return nil, err
+	}
+	if err := postJSON(ctx, o.Client, url, headers, payload, &resp); err != nil {
 		var ae *APIError
 		if asAPIError(err, &ae) && len(req.Tools) > 0 && ae.Status == http.StatusBadRequest &&
 			strings.Contains(strings.ToLower(ae.Body), "does not support tools") {

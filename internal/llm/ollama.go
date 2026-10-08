@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 )
 
 // Ollama talks to Ollama's native /api/chat endpoint. The native API is used
@@ -14,6 +15,14 @@ type Ollama struct {
 	BaseURL string // e.g. http://localhost:11434
 	APIKey  string // optional bearer token for proxied/cloud setups
 	Client  *http.Client
+	// Think switches the model's reasoning ("thinking") on or off with Ollama's
+	// think option; nil leaves it to the model. Models that cannot think refuse
+	// true: the request is then repeated without it.
+	Think *bool
+	// ExtraBody holds further fields added to every chat request (see withExtra).
+	ExtraBody map[string]any
+
+	thinkUnsupported atomic.Bool
 }
 
 type ollamaMessage struct {
@@ -38,6 +47,7 @@ type ollamaRequest struct {
 	Tools    []ollamaTool    `json:"tools,omitempty"`
 	Stream   bool            `json:"stream"`
 	Options  map[string]any  `json:"options,omitempty"`
+	Think    *bool           `json:"think,omitempty"`
 }
 
 type ollamaTool struct {
@@ -98,10 +108,27 @@ func (o *Ollama) Chat(ctx context.Context, req Request) (*Response, error) {
 	if o.APIKey != "" {
 		headers["Authorization"] = "Bearer " + o.APIKey
 	}
+	if o.Think != nil && (!*o.Think || !o.thinkUnsupported.Load()) {
+		body.Think = o.Think
+	}
 	var resp ollamaResponse
 	url := strings.TrimRight(o.BaseURL, "/") + "/api/chat"
-	if err := postJSON(ctx, o.Client, url, headers, body, &resp); err != nil {
-		var ae *APIError
+	send := func() error {
+		payload, err := withExtra(body, o.ExtraBody)
+		if err != nil {
+			return err
+		}
+		return postJSON(ctx, o.Client, url, headers, payload, &resp)
+	}
+	err := send()
+	var ae *APIError
+	if err != nil && body.Think != nil && asAPIError(err, &ae) && ae.Status == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(ae.Body), "does not support thinking") {
+		o.thinkUnsupported.Store(true) // the model cannot think: ask without the option from now on
+		body.Think = nil
+		err = send()
+	}
+	if err != nil {
 		if asAPIError(err, &ae) && len(req.Tools) > 0 && ae.Status == http.StatusBadRequest &&
 			strings.Contains(strings.ToLower(ae.Body), "does not support tools") {
 			return nil, ErrToolsUnsupported
