@@ -58,7 +58,14 @@ type Config struct {
 	NoCommands bool
 	// Intro makes the model introduce itself the first time it answers in a
 	// chat; the introduction is part of the history.
-	Intro          bool
+	Intro bool
+	// TriggerRemindTimeout is how long the model may take to give a scheduled
+	// reminder before it is sent as it was written (default 30 s);
+	// TriggerHistory is how many of the latest messages it is shown (default 10).
+	TriggerRemindTimeout time.Duration
+	TriggerHistory       int
+	// TriggerPlain sends reminders as they were written, without the model.
+	TriggerPlain   bool
 	RateLimit      int // messages per user per minute; 0 = unlimited
 	MaxConcurrent  int // simultaneous model runs
 	RequestTimeout time.Duration
@@ -80,6 +87,7 @@ type Router struct {
 	limiter       *ratelimit.Limiter
 
 	resetWorkspace func(ctx context.Context, workspace string) error
+	notifiers      map[string]channel.Notifier
 	attach         *attachState
 
 	recordLimiter *ratelimit.Limiter

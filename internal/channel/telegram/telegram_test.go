@@ -384,3 +384,25 @@ func TestAMessageThatIsNeverAcceptedDoesNotStallTheChat(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestNotifierSendsWithoutAMessageToAnswer(t *testing.T) {
+	f := &fakeTelegram{t: t}
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	defer srv.Close()
+	var n channel.Notifier = newChannel(srv.URL)
+	r, err := n.ResponderFor("-1001234567890", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Send(context.Background(), "⏰ time to go"); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sent) != 1 || f.sent[0]["chat_id"] != float64(-1001234567890) || f.sent[0]["reply_parameters"] != nil || f.sent[0]["text"] != "⏰ time to go" {
+		t.Errorf("sent = %v (a scheduled message answers nothing, so it quotes nothing)", f.sent)
+	}
+	if _, err := n.ResponderFor("not a number", false); err == nil {
+		t.Error("a chat id must be a number")
+	}
+}

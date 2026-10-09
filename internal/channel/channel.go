@@ -18,6 +18,20 @@ type Responder interface {
 	Typing(ctx context.Context) error
 }
 
+// Notifier is implemented by channels that can send to a chat on their own,
+// without a message to answer: scheduled reminders and tasks use it.
+type Notifier interface {
+	// ResponderFor returns a Responder that delivers to the chat. It fails when
+	// the channel cannot reach the chat on its own.
+	ResponderFor(chatID string, isGroup bool) (Responder, error)
+}
+
+// Windowed is implemented by channels that may only write to a person within a
+// time after that person's last message (Messenger and WhatsApp: 24 hours).
+type Windowed interface {
+	Window() time.Duration
+}
+
 // ErrTooLarge is returned by Attachment.Fetch for a file over the limit.
 var ErrTooLarge = errors.New("channel: file too large")
 

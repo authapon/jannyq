@@ -566,6 +566,15 @@ func formatEvent(ev event) string {
 	return sb.String()
 }
 
+// ResponderFor implements channel.Notifier: the message goes to the visitor's
+// open streams and is kept in the chat, so a visitor who is away sees it on return.
+func (c *Channel) ResponderFor(chatID string, _ bool) (channel.Responder, error) {
+	if chatID == "" {
+		return nil, errors.New("web: no visitor")
+	}
+	return &responder{c: c, id: chatID}, nil
+}
+
 // responder delivers replies to the chat's open streams.
 type responder struct {
 	c  *Channel

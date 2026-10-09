@@ -809,3 +809,28 @@ func TestConfigTellsTheClientWhetherCommandsExist(t *testing.T) {
 		t.Errorf("commands = %v, want false", m["commands"])
 	}
 }
+
+func TestNotifierReachesAnOpenChatWithoutAMessage(t *testing.T) {
+	h := newHarness(t, nil)
+	h.start()
+	s := h.stream(nil)
+	// the visitor's id is the first part of the session cookie
+	id := strings.SplitN(h.cookieValue(), ".", 2)[0]
+	var n channel.Notifier = h.ch
+	r, err := n.ResponderFor(id, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Send(context.Background(), "⏰ scheduled"); err != nil {
+		t.Fatal(err)
+	}
+	ev := s.next(t)
+	var payload struct{ Text string }
+	_ = json.Unmarshal([]byte(ev.Data), &payload)
+	if ev.Type != "message" || payload.Text != "⏰ scheduled" {
+		t.Errorf("event = %+v", ev)
+	}
+	if _, err := n.ResponderFor("", false); err == nil {
+		t.Error("no visitor, no responder")
+	}
+}

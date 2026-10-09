@@ -629,3 +629,18 @@ func TestNoCommandsDoNotAddressTheBot(t *testing.T) {
 		t.Errorf("ok=%v %+v", ok, in)
 	}
 }
+
+func TestNotifierPushes(t *testing.T) {
+	r := newRig(t, nil)
+	var n channel.Notifier = r.ch
+	rs, err := n.ResponderFor("G7", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rs.Send(context.Background(), "scheduled"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.api.only("/v2/bot/message/reply")) != 0 || len(r.api.only("/v2/bot/message/push")) != 1 {
+		t.Errorf("calls = %+v", r.api.sent())
+	}
+}

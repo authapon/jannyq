@@ -6,6 +6,7 @@ package messenger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -222,6 +223,18 @@ func (c *Channel) displayName(ctx context.Context, psid string) string {
 	}
 	return name
 }
+
+// ResponderFor implements channel.Notifier.
+func (c *Channel) ResponderFor(chatID string, _ bool) (channel.Responder, error) {
+	if chatID == "" {
+		return nil, errors.New("messenger: no recipient")
+	}
+	return &responder{c: c, psid: chatID}, nil
+}
+
+// Window implements channel.Windowed: Messenger allows a message to a person
+// within 24 hours of the person's last one.
+func (*Channel) Window() time.Duration { return 24 * time.Hour }
 
 type responder struct {
 	c    *Channel

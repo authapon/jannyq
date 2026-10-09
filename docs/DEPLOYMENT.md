@@ -96,6 +96,7 @@ scrape_configs:
 | `jannyq_tool_calls_total{tool,result}` | tools (`unknown` for names the model made up) |
 | `jannyq_compactions_total{result}` | conversation summaries |
 | `jannyq_attachments_total{kind,result}` | files: `read`, `failed`, `skipped` |
+| `jannyq_trigger_runs_total{mode,result}`, `jannyq_triggers_active{mode}` | scheduled reminders and tasks (alert on a rising `failed`) |
 | `jannyq_knowledge_files{status}`, `jannyq_knowledge_passages{embedded}`, `jannyq_knowledge_indexing_pending_files`, `jannyq_knowledge_last_scan_timestamp_seconds`, `jannyq_knowledge_scans_total`, `jannyq_knowledge_changes_total{change}`, `jannyq_knowledge_embed_failures_total` | the knowledge base |
 | `jannyq_open_sessions` | chat databases open |
 | `jannyq_http_requests_total{class}` | `2xx`…`5xx` of the web server |
@@ -188,6 +189,7 @@ version, restore the backup made in step 1 together with the older image.
 | Messages, summaries, who said what and when | `<data>/sessions/<channel>/<chat>/session.db` | `/reset`, `JANNYQ_RETENTION_DAYS`, deleting the folder |
 | Files users sent (resized pictures, PDFs, text) | `…/<chat>/files/` | the same; oldest first above `--attach-chat-mb` |
 | Copies for `run_command` | the sandbox workspace `inbox/` | `/reset`, the sandbox's idle clean-up (7 days) |
+| Scheduled reminders and tasks | `<data>/triggers.db` (no message text is logged) | the owner deletes them in chat, `JANNYQ_RETENTION_DAYS` (with their chat), deleting the file |
 | Knowledge base | `<data>/knowledge.db`, from the folder you mount | the folder is the source of truth: delete the file and the index follows |
 | Web session key | `<data>/web_secret` | rotating it signs everybody out |
 | Command log (who ran what) | `<data>/audit/commands.jsonl` | rotates at 10 MB; delete as your policy says |

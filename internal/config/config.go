@@ -87,25 +87,33 @@ type Config struct {
 	WebRunRate         int
 
 	// Attachments: pictures, PDFs and text files sent by users
-	Attachments       bool
-	Vision            string // auto, on or off
-	AttachMaxMB       int    // largest file accepted
-	AttachPerMessage  int
-	AttachRate        int // files per user per minute
-	AttachChatMB      int // disk space of one chat's files
-	AttachInlineChars int
-	AttachInbox       bool // copy files into the run_command workspace
-	Intro             bool // greet each chat the first time the bot answers in it
-	Commands          bool // chat commands (/help, /reset, /compact) are available
-	ImageMaxEdge      int
-	ImageMessages     int // latest messages whose pictures are sent to the model
-	PDFEngine         string
-	PDFMaxPages       int
-	OCRLangs          string
-	OCRMaxPages       int
-	VisionPages       int // pages of a scanned PDF shown as pictures
-	WebMaxUploadMB    int
-	WebMaxFiles       int
+	Attachments          bool
+	Vision               string // auto, on or off
+	AttachMaxMB          int    // largest file accepted
+	AttachPerMessage     int
+	AttachRate           int // files per user per minute
+	AttachChatMB         int // disk space of one chat's files
+	AttachInlineChars    int
+	AttachInbox          bool // copy files into the run_command workspace
+	Intro                bool // greet each chat the first time the bot answers in it
+	Commands             bool // chat commands (/help, /reset, /compact) are available
+	Triggers             bool
+	TriggerTasks         bool
+	TriggerMaxPerChat    int
+	TriggerMinInterval   time.Duration
+	TriggerGrace         time.Duration
+	TriggerHistory       int
+	TriggerRemindTimeout time.Duration
+	TriggerStyle         string
+	ImageMaxEdge         int
+	ImageMessages        int // latest messages whose pictures are sent to the model
+	PDFEngine            string
+	PDFMaxPages          int
+	OCRLangs             string
+	OCRMaxPages          int
+	VisionPages          int // pages of a scanned PDF shown as pictures
+	WebMaxUploadMB       int
+	WebMaxFiles          int
 
 	// Knowledge base
 	KnowledgeDir         string
@@ -356,6 +364,14 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.integer(&c.AttachChatMB, "attach-chat-mb", 200, "disk space for the files of one chat in MB; the oldest are deleted beyond it")
 	l.integer(&c.AttachInlineChars, "attach-inline-chars", 6000, "longest document text shown in the conversation itself; longer documents are read with read_attachment")
 	l.boolean(&c.Intro, "intro", true, "introduce the bot, in --lang, the first time it answers in a chat")
+	l.boolean(&c.Triggers, "triggers", true, "let users have the bot remind them, or do a task, at a time they set (once or by a cron schedule); kept in <data-dir>/triggers.db")
+	l.boolean(&c.TriggerTasks, "trigger-tasks", true, "with --triggers: allow scheduled tasks (the model carries out an instruction, with its tools) and not only reminders")
+	l.integer(&c.TriggerMaxPerChat, "trigger-max-per-chat", 20, "most scheduled reminders and tasks one chat may have")
+	l.duration(&c.TriggerMinInterval, "trigger-min-interval", 15*time.Minute, "shortest time between two runs of a repeating task (a repeating reminder may run every minute)")
+	l.duration(&c.TriggerGrace, "trigger-grace", time.Hour, "how late a trigger may still be run after the bot was off: a late one-time trigger is sent saying so; a repeating one skips that occurrence")
+	l.integer(&c.TriggerHistory, "trigger-history", 10, "how many of the latest messages the model sees when it gives a scheduled reminder")
+	l.duration(&c.TriggerRemindTimeout, "trigger-remind-timeout", 30*time.Second, "how long the model may take to give a scheduled reminder before it is sent as it was written")
+	l.str(&c.TriggerStyle, "trigger-style", "natural", "scheduled reminders: natural (the model gives them in its own words, falling back to the written text) or plain (the text as written)")
 	l.boolean(&c.Commands, "commands", true, "chat commands /help, /reset and /compact (false: no slash commands at all, every message goes to the model)")
 	l.boolean(&c.AttachInbox, "attach-inbox", true, "also copy files into the run_command workspace (inbox/) when commands are enabled")
 	l.integer(&c.ImageMaxEdge, "image-max-edge", 1568, "pictures are shrunk so that their longer side is at most this many pixels")
@@ -669,6 +685,21 @@ func (c *Config) validate() error {
 	}
 	if c.WebMaxUploadMB < 1 || c.WebMaxFiles < 1 {
 		bad("--web-max-upload-mb and --web-max-files must be at least 1")
+	}
+	if c.TriggerMaxPerChat < 1 || c.TriggerMaxPerChat > 500 {
+		bad("--trigger-max-per-chat must be between 1 and 500")
+	}
+	if c.TriggerMinInterval < time.Minute {
+		bad("--trigger-min-interval must be at least 1m")
+	}
+	if c.TriggerGrace < time.Minute {
+		bad("--trigger-grace must be at least 1m")
+	}
+	if c.TriggerHistory < 1 || c.TriggerRemindTimeout < time.Second {
+		bad("--trigger-history must be at least 1 and --trigger-remind-timeout at least 1s")
+	}
+	if c.TriggerStyle != "natural" && c.TriggerStyle != "plain" {
+		bad("--trigger-style must be natural or plain")
 	}
 	switch c.Thinking = strings.ToLower(strings.TrimSpace(c.Thinking)); c.Thinking {
 	case "auto", "on", "off":

@@ -185,6 +185,12 @@ func Create(ctx context.Context, dir string, o Options) (string, error) {
 			return "", err
 		}
 	}
+	// scheduled reminders and tasks
+	if tdb := filepath.Join(o.DataDir, "triggers.db"); fileExists(tdb) {
+		if err := snapshot("triggers.db", tdb); err != nil {
+			return "", err
+		}
+	}
 	// secrets and logs
 	if err := skipVanished(add("web_secret", filepath.Join(o.DataDir, "web_secret"))); err != nil {
 		return "", err
@@ -318,7 +324,7 @@ func allowedPath(name string) bool {
 		}
 	}
 	switch {
-	case name == manifestName, name == "knowledge.db", name == "web_secret":
+	case name == manifestName, name == "knowledge.db", name == "triggers.db", name == "web_secret":
 		return true
 	case strings.HasPrefix(name, "sessions/"), strings.HasPrefix(name, "audit/"):
 		return strings.Count(name, "/") <= 6
@@ -495,7 +501,7 @@ func Restore(archive, dataDir string, o RestoreOptions) (Manifest, error) {
 			}
 		}
 	}
-	tops := []string{"sessions", "knowledge.db", "web_secret", "audit"}
+	tops := []string{"sessions", "knowledge.db", "triggers.db", "web_secret", "audit"}
 	var existing []string
 	for _, t := range tops {
 		if _, err := os.Lstat(filepath.Join(dataDir, t)); err == nil {
@@ -523,4 +529,9 @@ func Restore(archive, dataDir string, o RestoreOptions) (Manifest, error) {
 		}
 	}
 	return man, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

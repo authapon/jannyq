@@ -13,9 +13,12 @@ import (
 // CallContext identifies who and where a tool call originates from.
 type CallContext struct {
 	SessionKey string
-	Channel    string
-	UserID     string
-	UserName   string
+	// ChatID and IsGroup say which chat the call comes from.
+	ChatID   string
+	IsGroup  bool
+	Channel  string
+	UserID   string
+	UserName string
 	// Origin is set for anonymous channels (the web chat): the address the
 	// user comes from, which limits should be keyed on instead of the user.
 	Origin string

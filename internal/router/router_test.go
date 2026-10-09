@@ -27,12 +27,23 @@ type fakeLLM struct {
 	reply    func(llm.Request) (*llm.Response, error)
 }
 
-func (f *fakeLLM) Chat(_ context.Context, req llm.Request) (*llm.Response, error) {
+func (f *fakeLLM) Chat(ctx context.Context, req llm.Request) (*llm.Response, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.mu.Unlock()
 	if f.reply != nil {
-		return f.reply(req)
+		type result struct {
+			resp *llm.Response
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() { r, err := f.reply(req); done <- result{r, err} }()
+		select {
+		case v := <-done:
+			return v.resp, v.err
+		case <-ctx.Done(): // like a real model client, give up when asked to
+			return nil, ctx.Err()
+		}
 	}
 	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: "pong"}}, nil
 }

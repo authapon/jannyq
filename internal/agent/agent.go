@@ -116,6 +116,13 @@ type Input struct {
 	// When later messages were stored while it waited, the model is told which
 	// one to answer. Zero means the newest.
 	AnswerFor int64
+	// NoTools keeps tools from the model for this message (a scheduled reminder
+	// needs none). HistoryLimit, when positive, shows the model only about that
+	// many of the latest messages (and the summary of the older ones). Note is a
+	// system note put after the conversation.
+	NoTools      bool
+	HistoryLimit int
+	Note         string
 	// Introduced says that the model has just introduced itself in reply to
 	// this message, so the answer should not repeat it.
 	Introduced bool
@@ -286,6 +293,8 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 
 	cc := tool.CallContext{
 		SessionKey: s.Channel + ":" + s.ChatID,
+		ChatID:     s.ChatID,
+		IsGroup:    in.IsGroup,
 		Channel:    in.Channel,
 		UserID:     in.UserID,
 		UserName:   in.Sender,
@@ -320,6 +329,9 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		if err != nil {
 			return "", err
 		}
+		if in.HistoryLimit > 0 {
+			stored = lastMessages(stored, in.HistoryLimit)
+		}
 		view, err := a.newView(ctx, s, stored, false)
 		if err != nil {
 			return "", err
@@ -329,7 +341,7 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 
 		var defs []llm.ToolDef
 		final := step == a.cfg.MaxSteps // out of tool rounds: force an answer
-		if !final && !a.toolsUnsupported.Load() {
+		if !final && !in.NoTools && !a.toolsUnsupported.Load() {
 			defs = a.tools.Defs()
 		}
 		msgs := a.buildMessages(in, summary, history, len(defs) > 0, final)
@@ -338,6 +350,9 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		}
 		if in.Introduced {
 			msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: afterIntroNote})
+		}
+		if in.Note != "" {
+			msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: in.Note})
 		}
 		withNote := func(msgs []llm.Message) []llm.Message {
 			if pre == "" {
@@ -403,6 +418,22 @@ func (a *Agent) Respond(ctx context.Context, s *session.Session, in Input) (stri
 		}
 	}
 	return "", ErrEmptyResponse // unreachable: the final step always returns
+}
+
+// lastMessages keeps about the latest n messages, starting at a message of a
+// user so that no answer or tool result is left without what it answers.
+func lastMessages(stored []session.Stored, n int) []session.Stored {
+	if len(stored) <= n {
+		return stored
+	}
+	start := len(stored) - n
+	for start < len(stored) && stored[start].Message.Role != llm.RoleUser {
+		start++
+	}
+	if start >= len(stored) { // no user message in the tail: keep the newest
+		return stored[len(stored)-1:]
+	}
+	return stored[start:]
 }
 
 // prefetchWanted reports whether documents should be looked up for the message

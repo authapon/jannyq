@@ -547,3 +547,24 @@ func TestKnowledgeModeAndWholeTokens(t *testing.T) {
 		t.Errorf("a negative budget must be refused: %v", err)
 	}
 }
+
+func TestTriggerSettings(t *testing.T) {
+	model := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	c, err := load(t, nil, model)
+	if err != nil || !c.Triggers || !c.TriggerTasks || c.TriggerMaxPerChat != 20 || c.TriggerMinInterval != 15*time.Minute ||
+		c.TriggerGrace != time.Hour || c.TriggerHistory != 10 || c.TriggerRemindTimeout != 30*time.Second || c.TriggerStyle != "natural" {
+		t.Fatalf("defaults: %v %+v", err, c)
+	}
+	c, err = load(t, []string{"--triggers=false", "--trigger-style", "plain", "--trigger-max-per-chat", "5"}, model)
+	if err != nil || c.Triggers || c.TriggerStyle != "plain" || c.TriggerMaxPerChat != 5 {
+		t.Fatalf("set: %v %+v", err, c)
+	}
+	for _, bad := range [][]string{
+		{"--trigger-style", "loud"}, {"--trigger-max-per-chat", "0"}, {"--trigger-min-interval", "10s"},
+		{"--trigger-grace", "1s"}, {"--trigger-history", "0"}, {"--trigger-remind-timeout", "0s"},
+	} {
+		if _, err := load(t, bad, model); err == nil || !strings.Contains(err.Error(), "--trigger") {
+			t.Errorf("%v must be refused, err = %v", bad, err)
+		}
+	}
+}

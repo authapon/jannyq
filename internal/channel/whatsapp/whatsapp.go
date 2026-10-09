@@ -6,6 +6,7 @@ package whatsapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -217,6 +218,18 @@ func (c *Channel) fetcher(mediaID string) func(context.Context, int64) ([]byte, 
 		return data, err
 	}
 }
+
+// ResponderFor implements channel.Notifier.
+func (c *Channel) ResponderFor(chatID string, _ bool) (channel.Responder, error) {
+	if chatID == "" {
+		return nil, errors.New("whatsapp: no recipient")
+	}
+	return &responder{c: c, to: chatID}, nil
+}
+
+// Window implements channel.Windowed: WhatsApp allows a free-form message to a
+// person within 24 hours of the person's last one.
+func (*Channel) Window() time.Duration { return 24 * time.Hour }
 
 type responder struct {
 	c         *Channel

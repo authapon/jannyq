@@ -497,6 +497,16 @@ func (c *Channel) convert(m *tgMessage) (channel.Incoming, bool) {
 	}, true
 }
 
+// ResponderFor implements channel.Notifier. Messages for a chat that uses
+// topics go to its general topic.
+func (c *Channel) ResponderFor(chatID string, _ bool) (channel.Responder, error) {
+	id, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: %q is not a chat id", chatID)
+	}
+	return &responder{c: c, chatID: id}, nil
+}
+
 type responder struct {
 	c       *Channel
 	chatID  int64

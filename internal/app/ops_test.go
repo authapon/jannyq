@@ -19,6 +19,7 @@ import (
 	"github.com/authapon/jannyq/internal/llm"
 	"github.com/authapon/jannyq/internal/metrics"
 	"github.com/authapon/jannyq/internal/session"
+	"github.com/authapon/jannyq/internal/trigger"
 )
 
 func freeAddr(t *testing.T) string {
@@ -240,5 +241,66 @@ func TestDataDirectoryPermissionWarning(t *testing.T) {
 	checkDataDir(filepath.Join(dir, "missing"), log)
 	if buf.Len() != 0 {
 		t.Errorf("a private directory was reported: %q", buf.String())
+	}
+}
+
+func TestTriggersOfDeletedChatsAreForgotten(t *testing.T) {
+	dir := t.TempDir()
+	sessions := session.NewManager(dir, 4, 4)
+	defer sessions.Close()
+	ctx := context.Background()
+	for _, chat := range []string{"old", "kept"} {
+		if err := sessions.With(ctx, "telegram", chat, func(s *session.Session) error {
+			return s.Append(ctx, llm.Message{Role: llm.RoleUser, Content: "x"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-10 * 24 * time.Hour)
+	entries, _ := os.ReadDir(filepath.Join(dir, "telegram"))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "old") {
+			for _, f := range []string{"session.db", "session.db-wal"} {
+				_ = os.Chtimes(filepath.Join(dir, "telegram", e.Name(), f), past, past)
+			}
+		}
+	}
+	cfg := &config.Config{DataDir: t.TempDir(), Triggers: true, TriggerGrace: time.Hour}
+	ts, err := newTriggers(cfg, time.UTC, metrics.NewInstruments(nil), quiet())
+	if err != nil || ts == nil {
+		t.Fatal(err)
+	}
+	defer ts.store.Close()
+	for _, chat := range []string{"old", "kept"} {
+		if _, err := ts.store.Create(ctx, trigger.Trigger{Channel: "telegram", ChatID: chat, OwnerID: "1", Mode: trigger.ModeRemind, Text: "x",
+			Cron: "0 7 * * *", Zone: "UTC", Next: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		runRetentionEvery(rctx, &config.Config{RetentionDays: 7}, sessions, metrics.NewInstruments(nil), quiet(), 5*time.Millisecond, time.Hour,
+			func() { ts.forgetChats(sessions, quiet()) })
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if l, _ := ts.store.List(ctx, "telegram", "old"); len(l) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if l, _ := ts.store.List(ctx, "telegram", "old"); len(l) != 0 {
+		t.Error("the trigger of a deleted chat survived")
+	}
+	if l, _ := ts.store.List(ctx, "telegram", "kept"); len(l) != 1 {
+		t.Error("the trigger of a chat that is still there was deleted")
+	}
+	// off by configuration: nothing is opened
+	if off, err := newTriggers(&config.Config{DataDir: t.TempDir()}, time.UTC, metrics.NewInstruments(nil), quiet()); off != nil || err != nil {
+		t.Errorf("triggers off: %v %v", off, err)
 	}
 }

@@ -142,11 +142,12 @@ func runBackupsEvery(ctx context.Context, cfg *config.Config, version string, in
 }
 
 // runRetention deletes chats that have been idle for cfg.RetentionDays.
-func runRetention(ctx context.Context, cfg *config.Config, sessions *session.Manager, inst metrics.Instruments, log *slog.Logger) {
-	runRetentionEvery(ctx, cfg, sessions, inst, log, time.Minute, time.Hour)
+func runRetention(ctx context.Context, cfg *config.Config, sessions *session.Manager, inst metrics.Instruments, log *slog.Logger, after ...func()) {
+	runRetentionEvery(ctx, cfg, sessions, inst, log, time.Minute, time.Hour, after...)
 }
 
-func runRetentionEvery(ctx context.Context, cfg *config.Config, sessions *session.Manager, inst metrics.Instruments, log *slog.Logger, first, every time.Duration) {
+// runRetentionEvery deletes idle chats; after each sweep it calls the after hooks.
+func runRetentionEvery(ctx context.Context, cfg *config.Config, sessions *session.Manager, inst metrics.Instruments, log *slog.Logger, first, every time.Duration, after ...func()) {
 	wait := first
 	for {
 		select {
@@ -161,6 +162,9 @@ func runRetentionEvery(ctx context.Context, cfg *config.Config, sessions *sessio
 		if n > 0 {
 			inst.Retention.Add(float64(n), "chats")
 			log.Info("idle chats deleted", "count", n, "older_than_days", cfg.RetentionDays)
+		}
+		for _, f := range after {
+			f()
 		}
 		wait = every
 	}

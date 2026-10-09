@@ -156,6 +156,15 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		}
 	}
 
+	trig, err := newTriggers(cfg, mustLocation(cfg), inst, log)
+	if err != nil {
+		return err
+	}
+	if trig != nil {
+		defer trig.store.Close()
+		trig.register(tools)
+	}
+
 	var temp *float64
 	if cfg.Temperature >= 0 {
 		t := cfg.Temperature
@@ -222,7 +231,12 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		MaxConcurrent:  cfg.MaxConcurrent,
 		RequestTimeout: cfg.RequestTimeout,
 		Metrics:        inst,
+
+		TriggerRemindTimeout: cfg.TriggerRemindTimeout,
+		TriggerHistory:       cfg.TriggerHistory,
+		TriggerPlain:         cfg.TriggerStyle == "plain",
 	}, sessions, ag, tr, log)
+	registerTriggerGauges(reg, trig)
 	registerGauges(reg, sessions, kbase)
 	if runner != nil {
 		rt.SetWorkspaceReset(runner.runner.Reset)
@@ -334,9 +348,13 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		return errors.New("no channel enabled: set JANNYQ_TELEGRAM_TOKEN, JANNYQ_DISCORD_TOKEN or the LINE, Messenger or WhatsApp settings, use --web or use --cli")
 	}
 
+	if trig != nil {
+		trig.attach(rt, channels, log)
+	}
+
 	log.Info("jannyq starting",
 		"version", version, "model", cfg.LLMModel, "provider", cfg.LLMProvider,
-		"thinking", cfg.Thinking, "context_size", cfg.ContextSize, "lang", cfg.Lang, "timezone", loc.String(), "group_context", cfg.GroupContext,
+		"thinking", cfg.Thinking, "triggers", cfg.Triggers, "context_size", cfg.ContextSize, "lang", cfg.Lang, "timezone", loc.String(), "group_context", cfg.GroupContext,
 		"tools", tools.Len(), "run_command", cfg.RunCommand, "channels", len(channels), "data_dir", cfg.DataDir)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -370,11 +388,22 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		}()
 		log.Info("automatic backups on", "dir", cfg.BackupDir, "every", cfg.BackupInterval, "keep", cfg.BackupKeep)
 	}
+	if trig != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			trig.sched.Run(runCtx)
+		}()
+	}
 	if cfg.RetentionDays > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runRetention(runCtx, cfg, sessions, inst, log)
+			var after []func()
+			if trig != nil {
+				after = append(after, func() { trig.forgetChats(sessions, log) })
+			}
+			runRetention(runCtx, cfg, sessions, inst, log, after...)
 		}()
 		log.Info("idle chats are deleted after", "days", cfg.RetentionDays)
 	}
@@ -431,4 +460,14 @@ func Run(ctx context.Context, cfg *config.Config, version string, log *slog.Logg
 		}
 	}
 	return runErr
+}
+
+// mustLocation returns the configured time zone (the configuration has been
+// validated, so a bad name cannot get here).
+func mustLocation(cfg *config.Config) *time.Location {
+	loc, err := cfg.Location()
+	if err != nil {
+		return time.UTC
+	}
+	return loc
 }

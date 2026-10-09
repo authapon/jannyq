@@ -458,3 +458,34 @@ func TestKnowledgeDatabaseElsewhere(t *testing.T) {
 		t.Error("the knowledge database was not taken from its own location")
 	}
 }
+
+func TestTriggersAreBackedUpAndRestored(t *testing.T) {
+	d, _ := dataDir(t)
+	mkdb(t, filepath.Join(d, "triggers.db"), "remind Peter")
+	p, err := Create(bg, t.TempDir(), Options{DataDir: d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	man, err := Verify(p, t.TempDir())
+	if err != nil {
+		t.Fatalf("an archive with triggers must verify: %v", err)
+	}
+	found := false
+	for _, f := range man.Files {
+		found = found || f.Path == "triggers.db"
+	}
+	if !found {
+		t.Errorf("triggers.db is not in the backup: %+v", man.Files)
+	}
+	dest := t.TempDir()
+	if _, err := Restore(p, dest, RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := values(t, filepath.Join(dest, "triggers.db")); got != "remind Peter" {
+		t.Errorf("restored triggers = %q", got)
+	}
+	// restoring over an existing one needs --force, and moves the old one aside
+	if _, err := Restore(p, dest, RestoreOptions{}); err == nil {
+		t.Error("an existing data directory must be refused without force")
+	}
+}

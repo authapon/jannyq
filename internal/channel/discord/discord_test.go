@@ -531,3 +531,22 @@ func TestNoCommandsLeavesBangAndSlashTextAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestNotifierSendsToTheChannel(t *testing.T) {
+	f := newFake(t)
+	var n channel.Notifier = f.channel()
+	r, err := n.ResponderFor("chan9", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Send(context.Background(), "scheduled"); err != nil {
+		t.Fatal(err)
+	}
+	p := f.sentPosts()
+	if len(p) != 1 || p[0]["content"] != "scheduled" || p[0]["message_reference"] != nil {
+		t.Errorf("%v", p)
+	}
+	if _, err := n.ResponderFor("", false); err == nil {
+		t.Error("an empty channel id")
+	}
+}

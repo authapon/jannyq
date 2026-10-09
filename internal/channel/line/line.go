@@ -433,6 +433,15 @@ func (c *Channel) fetcher(messageID string, declared int64) func(context.Context
 
 // --- replies ---
 
+// ResponderFor implements channel.Notifier: without a reply token everything
+// is pushed, which counts against the monthly message quota of the account.
+func (c *Channel) ResponderFor(chatID string, isGroup bool) (channel.Responder, error) {
+	if chatID == "" {
+		return nil, errors.New("line: no chat id")
+	}
+	return &responder{c: c, chatID: chatID, isGroup: isGroup}, nil
+}
+
 type responder struct {
 	c       *Channel
 	chatID  string

@@ -18,6 +18,8 @@ type Channel struct {
 	In          io.Reader
 	Out         io.Writer
 	Interactive bool // print a prompt before each line
+
+	outMu sync.Mutex // one writer to Out at a time
 }
 
 // New returns a CLI channel on stdin/stdout.
@@ -35,6 +37,11 @@ func (c *Channel) Name() string { return "cli" }
 type responder struct {
 	c  *Channel
 	mu *sync.Mutex
+}
+
+// ResponderFor implements channel.Notifier: whatever the chat id, it is the terminal.
+func (c *Channel) ResponderFor(string, bool) (channel.Responder, error) {
+	return responder{c: c, mu: &c.outMu}, nil
 }
 
 func (r responder) Typing(context.Context) error { return nil }
@@ -63,7 +70,6 @@ func (c *Channel) Run(ctx context.Context, sink channel.Sink) error {
 		}
 	}()
 
-	var mu sync.Mutex
 	prompt := func() {
 		if c.Interactive {
 			fmt.Fprint(c.Out, "> ")
@@ -88,7 +94,7 @@ func (c *Channel) Run(ctx context.Context, sink channel.Sink) error {
 				UserID:    "local",
 				Text:      line,
 				Addressed: true,
-				Responder: responder{c: c, mu: &mu},
+				Responder: responder{c: c, mu: &c.outMu},
 			})
 			prompt()
 		}

@@ -123,6 +123,7 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--allowed-groups` | – | comma-separated **group** IDs (or `channel:id`) where *everybody* gets answers, listed in `--allowed-users` or not ([details](#who-may-use-the-bot---allowed-users---allowed-groups)) |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
 | `--intro` | `true` | the first time the bot answers in a chat, the **model** introduces itself (it reads the system prompt, so it describes the tools and skills you configured, and writes in `--lang`); the introduction is saved in the history like any reply (the answer to the same message follows as a second message, except for Telegram's automatic `/start` with `--commands=false`, which gets the introduction alone), costs one extra model call per chat, and `false` turns it off |
+| `--triggers` | `true` | let users ask the bot, in chat, for reminders and tasks at a set time or on a cron schedule; kept across restarts ([details](#reminders-and-scheduled-tasks)); `--trigger-tasks`, `--trigger-style`, `--trigger-max-per-chat`, `--trigger-min-interval`, `--trigger-grace` tune it |
 | `--commands` | `true` | chat commands `/help`, `/reset`, `/compact`; `false` removes **all** slash commands: such text is just a message for the model, and the web chat hides its **New chat** button |
 | `--rate-limit` | `20` | messages per user per minute |
 | `--system-prompt[-file]` | – | extra instructions for the model |
@@ -476,6 +477,44 @@ Every user message is shown to the model with a header:
 
 Chats stored before this version keep working: their messages are shown with the time they were written.
 
+## Reminders and scheduled tasks
+
+Users can ask the bot, in plain words, to do something **at a time** or **regularly**:
+
+> *"Remind me today at 15:00 to call Peter."* ·  *"Find interesting news for me every day at 7."* ·  *"Every Monday to Friday at 9:30 remind us of the stand-up."*
+
+The model sets this up itself with four tools: `trigger_create`, `trigger_list`, `trigger_update` (change, pause with `enabled=false`, resume)
+and `trigger_delete`. It works out the date from the current time in the message headers and tells the user what it set, with the weekday, so that
+a mistake shows. Triggers are kept in `<data-dir>/triggers.db` (included in backups), so they **survive a restart or a reboot**.
+
+- **Two kinds.** A *reminder* (`remind`) is given **by the model, in its own words**, as part of the chat, so it sounds like the bot and knows
+  the conversation ("3 pm, Ann: time to call Peter about the quote you mentioned this morning"); it runs without tools, sees only the latest
+  `--trigger-history` (10) messages, and if the model fails or takes longer than `--trigger-remind-timeout` (30 s) the reminder is **sent as it
+  was written** instead, so it is never lost. A *task* (`task`) is an instruction the model carries out when the time comes, with its tools (web
+  search, the knowledge base, …), and the result is sent to the chat; a failed task says so. `--trigger-style plain` makes reminders plain text
+  always (no model call); `--trigger-tasks=false` allows reminders only.
+- **When.** `at` is one date and time (ISO 8601, e.g. `2026-10-09T15:00:00+07:00`; without an offset it is read in `timezone`), `cron` repeats.
+  Cron has five fields, minute hour day-of-month month day-of-week, as in `crontab`: `*`, lists `1,15`, ranges `9-17`, steps `*/10`, names
+  `mon-fri` / `jan`, plus `@hourly @daily @weekly @monthly @yearly`. Examples: `0 7 * * *` every day 07:00 · `30 9 * * mon-fri` weekdays 09:30 ·
+  `*/30 * * * *` every 30 minutes · `0 8 1 * *` the 1st of each month 08:00. Schedules are read in the bot's `--timezone` or the one the user
+  names (e.g. `Asia/Bangkok`), so 07:00 stays 07:00 across daylight saving; a time the clocks skip is skipped. Not supported: seconds, `L`, `W`, `#`.
+- **The bot was off.** A **one-time** trigger that came due is sent when the bot is back, and says it is late; a **repeating** one that is later
+  than `--trigger-grace` (1 h) skips that occurrence and carries on with the next (within the grace it runs). The model gets the
+  chance to say so; a busy chat is retried.
+- **Where it goes.** To the chat that set it up: Telegram, Discord, LINE (sent as *push* messages, which count against the monthly quota of the LINE
+  account), the web chat (the message is kept in the chat, so a visitor who is away sees it on return) and the terminal. **Messenger and WhatsApp**
+  allow messages to a person only within 24 hours of their last one, so there only a **single reminder due within the next 23 hours** can be
+  set; the bot says so when asked for more.
+- **Limits.** At most `--trigger-max-per-chat` (20) triggers per chat; a repeating task at most every `--trigger-min-interval` (15 min), a repeating
+  reminder every minute; text up to 2000 characters; one-time triggers up to two years ahead. Everybody in a group can **list** its triggers; only
+  the person who set one up can **change or delete** it. If that person is no longer allowed (`--allowed-users` / `--allowed-groups`), the trigger is
+  switched off, not run. A finished one-time trigger is kept for a week (so "what did you remind me of?" works), then deleted. When a chat is
+  deleted by `--retention-days`, so are its triggers.
+- **Watch it.** The log shows `trigger created / updated / deleted` (never the text), `trigger fired` (id, mode, how late, result, time) and
+  `trigger not delivered` with the reason; `jannyq_trigger_runs_total{mode,result}` and `jannyq_triggers_active{mode}` are exported.
+  `--triggers=false` turns the whole thing off. **Take care in groups and on public bots:** anyone who may use the bot can have it write to the chat
+  later, and a task costs a model call (with tools) every time it runs: keep the limits low where that matters.
+
 ## Web chat
 
 ```sh
@@ -620,6 +659,7 @@ internal/llm        Provider interface; Ollama and OpenAI-compatible clients
 internal/agent      conversation loop, tool execution, compaction
 internal/session    per-chat SQLite storage with an LRU of open databases
 internal/tool       web_search, web_fetch, run_command, load_skill, read/search_attachment, SSRF-safe HTTP client
+internal/trigger    scheduled reminders and tasks: cron parser, SQLite store, scheduler
 internal/knowledge  shared knowledge base: chunking, SQLite store (FTS5 + vectors), hybrid search, folder indexer
 internal/attach     pictures (resize, EXIF), PDF text/OCR (sandbox or pure Go), text-file decoding
 internal/sandbox    command executor (limits, per-chat users), HTTP server and client

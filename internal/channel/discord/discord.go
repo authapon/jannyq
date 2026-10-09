@@ -566,6 +566,14 @@ func (c *Channel) call(ctx context.Context, method, path string, body any) error
 	}
 }
 
+// ResponderFor implements channel.Notifier.
+func (c *Channel) ResponderFor(chatID string, _ bool) (channel.Responder, error) {
+	if chatID == "" {
+		return nil, errors.New("discord: no channel id")
+	}
+	return &responder{c: c, channelID: chatID}, nil
+}
+
 type responder struct {
 	c         *Channel
 	channelID string
