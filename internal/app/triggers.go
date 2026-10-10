@@ -11,6 +11,7 @@ import (
 	"github.com/authapon/jannyq/internal/channel"
 	"github.com/authapon/jannyq/internal/config"
 	"github.com/authapon/jannyq/internal/metrics"
+	"github.com/authapon/jannyq/internal/ntfy"
 	"github.com/authapon/jannyq/internal/router"
 	"github.com/authapon/jannyq/internal/session"
 	"github.com/authapon/jannyq/internal/tool"
@@ -25,6 +26,7 @@ type triggerSystem struct {
 	tools     *tool.TriggerTools
 	notifiers map[string]channel.Notifier
 	windows   map[string]time.Duration
+	ntfy      *ntfy.Client // nil without --ntfy-url
 }
 
 // newTriggers opens the trigger database; it returns nil when --triggers is off.
@@ -44,11 +46,15 @@ func newTriggers(cfg *config.Config, loc *time.Location, inst metrics.Instrument
 		Store: store, Grace: cfg.TriggerGrace, Log: log,
 		OnRun: func(mode, result string) { inst.TriggerRuns.Inc(mode, result) },
 	}
+	if cfg.NtfyURL != "" {
+		ts.ntfy = &ntfy.Client{BaseURL: cfg.NtfyURL, Token: cfg.NtfyToken, TopicPrefix: cfg.NtfyTopicPrefix, Log: log}
+		log.Info("ntfy on for scheduled messages", "server", cfg.NtfyURL, "prefix", cfg.NtfyTopicPrefix, "token", cfg.NtfyToken != "")
+	}
 	ts.tools = &tool.TriggerTools{
 		Store: store, Location: loc, Windows: ts.windows,
 		CanSend:    func(ch string) bool { _, ok := ts.notifiers[ch]; return ok },
 		MaxPerChat: cfg.TriggerMaxPerChat, MinTaskInterval: cfg.TriggerMinInterval, NoTasks: !cfg.TriggerTasks,
-		Wake: ts.sched.Wake, Log: log,
+		Ntfy: ts.ntfy, Wake: ts.sched.Wake, Log: log,
 	}
 	return ts, nil
 }
@@ -73,6 +79,7 @@ func (ts *triggerSystem) attach(rt *router.Router, channels []channel.Channel, l
 		}
 	}
 	rt.SetNotifiers(ts.notifiers)
+	rt.SetNtfy(ts.ntfy, ts.store.GetPrefs)
 	ts.sched.Runner = trigger.RunnerFunc(rt.RunTrigger)
 	log.Info("scheduled reminders and tasks on", "channels", len(ts.notifiers))
 }

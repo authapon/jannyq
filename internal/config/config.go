@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,6 +107,9 @@ type Config struct {
 	TriggerHistory       int
 	TriggerRemindTimeout time.Duration
 	TriggerStyle         string
+	NtfyURL              string
+	NtfyToken            string
+	NtfyTopicPrefix      string
 	ImageMaxEdge         int
 	ImageMessages        int // latest messages whose pictures are sent to the model
 	PDFEngine            string
@@ -371,6 +376,9 @@ func Load(args []string, env func(string) string, stderr io.Writer) (*Config, er
 	l.duration(&c.TriggerGrace, "trigger-grace", time.Hour, "how late a trigger may still be run after the bot was off: a late one-time trigger is sent saying so; a repeating one skips that occurrence")
 	l.integer(&c.TriggerHistory, "trigger-history", 10, "how many of the latest messages the model sees when it gives a scheduled reminder")
 	l.duration(&c.TriggerRemindTimeout, "trigger-remind-timeout", 30*time.Second, "how long the model may take to give a scheduled reminder before it is sent as it was written")
+	l.str(&c.NtfyURL, "ntfy-url", "", "with --triggers: ntfy server (e.g. https://ntfy.sh or your own) through which users may have scheduled messages pushed to their phone; empty = no ntfy")
+	l.secret(&c.NtfyToken, "ntfy-token", "access token (tk_…) or user:password the bot uses on the ntfy server; empty = none")
+	l.str(&c.NtfyTopicPrefix, "ntfy-topic-prefix", "", "put this in front of every ntfy topic users name (use it with a token that may write only to prefix*, so the bot cannot be used on other topics)")
 	l.str(&c.TriggerStyle, "trigger-style", "natural", "scheduled reminders: natural (the model gives them in its own words, falling back to the written text) or plain (the text as written)")
 	l.boolean(&c.Commands, "commands", true, "chat commands /help, /reset and /compact (false: no slash commands at all, every message goes to the model)")
 	l.boolean(&c.AttachInbox, "attach-inbox", true, "also copy files into the run_command workspace (inbox/) when commands are enabled")
@@ -701,6 +709,27 @@ func (c *Config) validate() error {
 	if c.TriggerStyle != "natural" && c.TriggerStyle != "plain" {
 		bad("--trigger-style must be natural or plain")
 	}
+	c.NtfyURL = strings.TrimRight(strings.TrimSpace(c.NtfyURL), "/")
+	c.NtfyToken = strings.TrimSpace(c.NtfyToken)
+	if c.NtfyURL != "" {
+		u, err := url.Parse(c.NtfyURL)
+		switch {
+		case err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https"):
+			bad("--ntfy-url must be an http:// or https:// address")
+		case u.User != nil:
+			bad("--ntfy-url must not contain a user name or password; give them with --ntfy-token")
+		case u.Scheme == "http" && c.NtfyToken != "" && !isLoopbackHost(u.Hostname()):
+			bad("--ntfy-token would be sent in clear over http://; use an https:// --ntfy-url")
+		}
+		if !c.Triggers {
+			bad("--ntfy-url needs --triggers")
+		}
+		if c.NtfyTopicPrefix != "" && !ntfyPrefixRe.MatchString(c.NtfyTopicPrefix) {
+			bad("--ntfy-topic-prefix may contain only letters, digits, - and _, up to 32 characters")
+		}
+	} else if c.NtfyToken != "" || c.NtfyTopicPrefix != "" {
+		bad("--ntfy-token and --ntfy-topic-prefix need --ntfy-url")
+	}
 	switch c.Thinking = strings.ToLower(strings.TrimSpace(c.Thinking)); c.Thinking {
 	case "auto", "on", "off":
 	default:
@@ -818,4 +847,15 @@ func (c *Config) validateMeta(bad func(format string, a ...any)) {
 	check("--messenger-webhook-path", c.MessengerPath, messenger)
 	check("--whatsapp-webhook-path", c.WhatsAppPath, whatsapp)
 	check("--line-webhook-path", c.LinePath, c.LineSecret != "")
+}
+
+var ntfyPrefixRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
+// isLoopbackHost reports whether a host name is this machine.
+func isLoopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(h)
+	return err == nil && a.IsLoopback()
 }

@@ -90,7 +90,7 @@ schema ของฐานข้อมูลอัปเกรดไปข้า�
 | ข้อความ สรุป ใครพูดอะไรเมื่อไร | `<data>/sessions/<channel>/<chat>/session.db` | `/reset`, `JANNYQ_RETENTION_DAYS`, ลบโฟลเดอร์ |
 | ไฟล์ที่ผู้ใช้ส่ง | `…/<chat>/files/` | เช่นเดียวกัน (เก่าสุดก่อนเมื่อเกิน `--attach-chat-mb`) |
 | สำเนาให้ `run_command` | workspace ของ sandbox `inbox/` | `/reset`, ล้าง workspace ที่ไม่ใช้ 7 วัน |
-| เตือน/งานตามเวลา | `<data>/triggers.db` (ไม่บันทึกข้อความลง log) | เจ้าของลบในแชท, `JANNYQ_RETENTION_DAYS` (พร้อมแชท), ลบไฟล์ |
+| เตือน/งานตามเวลา | `<data>/triggers.db` (ไม่บันทึกข้อความลง log) | เจ้าของลบในแชท, `JANNYQ_RETENTION_DAYS` (พร้อมแชท), ลบไฟล์ ไฟล์นี้เก็บ topic ntfy ที่แต่ละคนบันทึกไว้ด้วย (`ntfy_settings clear` ลบได้) |
 | ฐานความรู้ | `<data>/knowledge.db` | โฟลเดอร์ต้นทางคือความจริง ลบไฟล์แล้วดัชนีตาม |
 | กุญแจ session ของเว็บ | `<data>/web_secret` | เปลี่ยนแล้วทุกคนต้องเข้าใหม่ |
 | log คำสั่ง | `<data>/audit/commands.jsonl` | หมุนที่ 10 MB |

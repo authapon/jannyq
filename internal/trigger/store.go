@@ -17,6 +17,13 @@ const (
 	ModeTask   = "task"   // the model carries out the instruction, with its tools, and reports
 )
 
+// Ways of delivering a trigger: in the chat, as an ntfy notification, or both.
+const (
+	NotifyChat = "chat"
+	NotifyNtfy = "ntfy"
+	NotifyBoth = "both"
+)
+
 // Statuses.
 const (
 	StatusActive   = "active"
@@ -42,6 +49,12 @@ type Trigger struct {
 	Zone      string // IANA name of the time zone the schedule is read in
 	Next      time.Time
 	Status    string
+	// Notify is how it is delivered (NotifyChat, NotifyNtfy or NotifyBoth). The
+	// ntfy topic is the one this trigger names, as the user wrote it; Priority is
+	// the ntfy priority from 1 to 5 (0 = the default).
+	Notify    string
+	NtfyTopic string
+	Priority  int
 
 	Created    time.Time
 	LastRun    time.Time
@@ -83,7 +96,17 @@ CREATE TABLE IF NOT EXISTS triggers (
 	last_result TEXT NOT NULL DEFAULT '',
 	last_error  TEXT NOT NULL DEFAULT '',
 	runs        INTEGER NOT NULL DEFAULT 0,
-	fails       INTEGER NOT NULL DEFAULT 0
+	fails       INTEGER NOT NULL DEFAULT 0,
+	notify      TEXT NOT NULL DEFAULT 'chat',
+	ntfy_topic  TEXT NOT NULL DEFAULT '',
+	priority    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS user_prefs (
+	channel        TEXT NOT NULL,
+	user_id        TEXT NOT NULL,
+	ntfy_topic     TEXT NOT NULL DEFAULT '',
+	default_notify TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (channel, user_id)
 );
 CREATE INDEX IF NOT EXISTS triggers_chat ON triggers(channel, chat_id);
 CREATE INDEX IF NOT EXISTS triggers_due ON triggers(status, next_unix);
@@ -109,11 +132,43 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init trigger db: %w", err)
 	}
+	// databases made before ntfy existed lack these columns
+	for _, c := range [][2]string{{"notify", "TEXT NOT NULL DEFAULT 'chat'"}, {"ntfy_topic", "TEXT NOT NULL DEFAULT ''"}, {"priority", "INTEGER NOT NULL DEFAULT 0"}} {
+		if err := ensureColumn(db, "triggers", c[0], c[1]); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("upgrade the trigger db: %w", err)
+		}
+	}
 	if _, err := db.Exec(`UPDATE triggers SET status = 'active' WHERE status = 'running'`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db, now: time.Now}, nil
+}
+
+// ensureColumn adds a column to a table that was created without it.
+func ensureColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		found = found || name == column
+	}
+	rows.Close()
+	if found {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
+	return err
 }
 
 // Close closes the database.
@@ -134,14 +189,14 @@ func fromUnix(n int64) time.Time {
 }
 
 const columns = `id, channel, chat_id, is_group, owner_id, owner_name, mode, title, text, cron, at_unix, zone, next_unix,
-	status, created, last_run, last_result, last_error, runs, fails`
+	status, created, last_run, last_result, last_error, runs, fails, notify, ntfy_topic, priority`
 
 func scan(row interface{ Scan(...any) error }) (Trigger, error) {
 	var t Trigger
 	var group int
 	var at, next, created, last int64
 	err := row.Scan(&t.ID, &t.Channel, &t.ChatID, &group, &t.OwnerID, &t.OwnerName, &t.Mode, &t.Title, &t.Text, &t.Cron, &at, &t.Zone,
-		&next, &t.Status, &created, &last, &t.LastResult, &t.LastError, &t.Runs, &t.Fails)
+		&next, &t.Status, &created, &last, &t.LastResult, &t.LastError, &t.Runs, &t.Fails, &t.Notify, &t.NtfyTopic, &t.Priority)
 	t.IsGroup = group != 0
 	t.At, t.Next, t.Created, t.LastRun = fromUnix(at), fromUnix(next), fromUnix(created), fromUnix(last)
 	return t, err
@@ -158,10 +213,13 @@ func (s *Store) Create(ctx context.Context, t Trigger) (int64, error) {
 	if t.Created.IsZero() {
 		t.Created = s.now()
 	}
+	if t.Notify == "" {
+		t.Notify = NotifyChat
+	}
 	res, err := s.db.ExecContext(ctx, `INSERT INTO triggers(channel, chat_id, is_group, owner_id, owner_name, mode, title, text, cron,
-		at_unix, zone, next_unix, status, created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		at_unix, zone, next_unix, status, created, notify, ntfy_topic, priority) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Channel, t.ChatID, boolInt(t.IsGroup), t.OwnerID, t.OwnerName, t.Mode, t.Title, t.Text, t.Cron,
-		unix(t.At), t.Zone, unix(t.Next), t.Status, unix(t.Created))
+		unix(t.At), t.Zone, unix(t.Next), t.Status, unix(t.Created), t.Notify, t.NtfyTopic, t.Priority)
 	if err != nil {
 		return 0, err
 	}
@@ -215,9 +273,12 @@ func (s *Store) Count(ctx context.Context, channel, chatID string) (int, error) 
 
 // Update stores the changeable fields of a trigger of a chat.
 func (s *Store) Update(ctx context.Context, t Trigger) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE triggers SET mode = ?, title = ?, text = ?, cron = ?, at_unix = ?, zone = ?, next_unix = ?, status = ?
-		WHERE id = ? AND channel = ? AND chat_id = ?`,
-		t.Mode, t.Title, t.Text, t.Cron, unix(t.At), t.Zone, unix(t.Next), t.Status, t.ID, t.Channel, t.ChatID)
+	if t.Notify == "" {
+		t.Notify = NotifyChat
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE triggers SET mode = ?, title = ?, text = ?, cron = ?, at_unix = ?, zone = ?, next_unix = ?, status = ?,
+		notify = ?, ntfy_topic = ?, priority = ? WHERE id = ? AND channel = ? AND chat_id = ?`,
+		t.Mode, t.Title, t.Text, t.Cron, unix(t.At), t.Zone, unix(t.Next), t.Status, t.Notify, t.NtfyTopic, t.Priority, t.ID, t.Channel, t.ChatID)
 	return affected(res, err)
 }
 
@@ -367,4 +428,37 @@ func (s *Store) Stats(ctx context.Context) (remind, task int, err error) {
 		}
 	}
 	return remind, task, rows.Err()
+}
+
+// Prefs are what a user has chosen for their scheduled messages: the ntfy
+// topic that is theirs, and how new triggers are delivered unless they say
+// otherwise ("" means in the chat only).
+type Prefs struct {
+	Channel       string
+	UserID        string
+	NtfyTopic     string
+	DefaultNotify string
+}
+
+// GetPrefs returns a user's preferences (empty ones for a user who has none).
+func (s *Store) GetPrefs(ctx context.Context, channel, userID string) (Prefs, error) {
+	p := Prefs{Channel: channel, UserID: userID}
+	err := s.db.QueryRowContext(ctx, `SELECT ntfy_topic, default_notify FROM user_prefs WHERE channel = ? AND user_id = ?`, channel, userID).
+		Scan(&p.NtfyTopic, &p.DefaultNotify)
+	if errors.Is(err, sql.ErrNoRows) {
+		return p, nil
+	}
+	return p, err
+}
+
+// SetPrefs stores a user's preferences; empty ones delete the row.
+func (s *Store) SetPrefs(ctx context.Context, p Prefs) error {
+	if p.NtfyTopic == "" && p.DefaultNotify == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM user_prefs WHERE channel = ? AND user_id = ?`, p.Channel, p.UserID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO user_prefs(channel, user_id, ntfy_topic, default_notify) VALUES (?,?,?,?)
+		ON CONFLICT(channel, user_id) DO UPDATE SET ntfy_topic = excluded.ntfy_topic, default_notify = excluded.default_notify`,
+		p.Channel, p.UserID, p.NtfyTopic, p.DefaultNotify)
+	return err
 }

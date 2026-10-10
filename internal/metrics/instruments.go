@@ -21,6 +21,7 @@ type Instruments struct {
 	Backups          *Counter // result
 	Retention        *Counter // what
 	TriggerRuns      *Counter // mode, result
+	Ntfy             *Counter // result
 }
 
 // NewInstruments registers the bot's metrics on r (nil gives no-op instruments).
@@ -42,6 +43,7 @@ func NewInstruments(r *Registry) Instruments {
 		HTTPRequests:     r.Counter("jannyq_http_requests_total", "HTTP requests by status class.", "class"),
 		Backups:          r.Counter("jannyq_backups_total", "Backups by result (ok, error).", "result"),
 		TriggerRuns:      r.Counter("jannyq_trigger_runs_total", "Scheduled reminders and tasks by mode and result (ok, failed, skipped, disabled).", "mode", "result"),
+		Ntfy:             r.Counter("jannyq_ntfy_total", "Scheduled messages pushed through ntfy, by result (ok, error).", "result"),
 		Retention:        r.Counter("jannyq_retention_deleted_total", "Chats deleted for being idle for longer than the retention period.", "what"),
 	}
 }

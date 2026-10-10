@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/authapon/jannyq/internal/ntfy"
 	"github.com/authapon/jannyq/internal/trigger"
 )
 
@@ -32,6 +33,10 @@ type TriggerTools struct {
 	MaxPerChat      int
 	MinTaskInterval time.Duration
 	NoTasks         bool
+	// Ntfy, when set, lets users have scheduled messages pushed through ntfy:
+	// the notify, ntfy_topic and priority arguments and the ntfy_settings tool
+	// exist only then.
+	Ntfy *ntfy.Client
 	// Wake tells the scheduler that triggers changed.
 	Wake func()
 	Log  *slog.Logger
@@ -44,9 +49,13 @@ const (
 	maxAhead        = 2 * 365 * 24 * time.Hour
 )
 
-// Tools returns the four tools.
+// Tools returns the four tools (and ntfy_settings when ntfy is set up).
 func (tt *TriggerTools) Tools() []Tool {
-	return []Tool{triggerCreate{tt}, triggerList{tt}, triggerUpdate{tt}, triggerDelete{tt}}
+	list := []Tool{triggerCreate{tt}, triggerList{tt}, triggerUpdate{tt}, triggerDelete{tt}}
+	if tt.Ntfy != nil {
+		list = append(list, ntfySettings{tt})
+	}
+	return list
 }
 
 func (tt *TriggerTools) now() time.Time {
@@ -109,7 +118,7 @@ const scheduleHelp = "one of: \"at\" (a single date and time, ISO 8601, e.g. 202
 	"\"30 9 * * mon-fri\" weekdays 09:30, \"*/30 * * * *\" every 30 minutes, \"0 8 1 * *\" the 1st of each month; or @daily, @hourly, @weekly, @monthly)"
 
 // resolve turns a schedule into what is stored, checking it against the rules.
-func (tt *TriggerTools) resolve(cc CallContext, mode string, s schedule, current *trigger.Trigger) (cron string, at, next time.Time, zone string, err error) {
+func (tt *TriggerTools) resolve(cc CallContext, mode, notify string, s schedule, current *trigger.Trigger) (cron string, at, next time.Time, zone string, err error) {
 	if s.At != "" && s.Cron != "" {
 		return "", time.Time{}, time.Time{}, "", errors.New(`give either "at" (once) or "cron" (repeating), not both`)
 	}
@@ -130,7 +139,12 @@ func (tt *TriggerTools) resolve(cc CallContext, mode string, s schedule, current
 			loc = l
 		}
 	}
+	// The limit of the 24 hour window applies to what goes to the chat; a
+	// message for ntfy only is not held back by it.
 	window := tt.Windows[cc.Channel]
+	if notify == trigger.NotifyNtfy {
+		window = 0
+	}
 
 	switch {
 	case s.Cron != "":
@@ -140,7 +154,7 @@ func (tt *TriggerTools) resolve(cc CallContext, mode string, s schedule, current
 		}
 		if window > 0 {
 			return "", time.Time{}, time.Time{}, "", fmt.Errorf("%s only lets the bot write to someone within %s of their last message, so repeating reminders are not possible there; "+
-				"set a single reminder (\"at\") for the next %s instead", cc.Channel, window, window-time.Hour)
+				"set a single reminder (\"at\") for the next %s instead%s", cc.Channel, window, window-time.Hour, tt.ntfyWindowHint())
 		}
 		n, ok := c.Next(now, loc)
 		if !ok {
@@ -163,7 +177,7 @@ func (tt *TriggerTools) resolve(cc CallContext, mode string, s schedule, current
 		}
 		if window > 0 && t.Sub(now) > window-time.Hour {
 			return "", time.Time{}, time.Time{}, "", fmt.Errorf("%s only lets the bot write to someone within %s of their last message, so a reminder can be set only for the next %s; "+
-				"tell the user that, or ask for an earlier time", cc.Channel, window, window-time.Hour)
+				"tell the user that, or ask for an earlier time%s", cc.Channel, window, window-time.Hour, tt.ntfyWindowHint())
 		}
 		return "", t, t, zone, nil
 	case current != nil: // only the time zone changed: read the same schedule in it
@@ -176,7 +190,15 @@ func (tt *TriggerTools) resolve(cc CallContext, mode string, s schedule, current
 			if err := tt.checkGap(c, mode, now, loc); err != nil {
 				return "", time.Time{}, time.Time{}, "", err
 			}
+			if window > 0 {
+				return "", time.Time{}, time.Time{}, "", fmt.Errorf("%s only lets the bot write to someone within %s of their last message, so repeating reminders are not possible there "+
+					"(unless they are sent through ntfy only)", cc.Channel, window)
+			}
 			return current.Cron, time.Time{}, n, zone, nil
+		}
+		if window > 0 && current.At.Sub(now) > window-time.Hour {
+			return "", time.Time{}, time.Time{}, "", fmt.Errorf("%s only lets the bot write to someone within %s of their last message, so that time is too far away "+
+				"(unless the reminder is sent through ntfy only)", cc.Channel, window)
 		}
 		return "", current.At, current.At, zone, nil
 	}
@@ -224,7 +246,7 @@ func clip(s string, n int) string {
 }
 
 // describe says what a trigger is, for the model to pass on to the user.
-func describe(t trigger.Trigger, now time.Time, withText bool) string {
+func describe(t trigger.Trigger, now time.Time, withText bool, viewer CallContext) string {
 	loc := t.Location()
 	var when string
 	if t.Recurring() {
@@ -263,6 +285,7 @@ func describe(t trigger.Trigger, now time.Time, withText bool) string {
 	case t.Status == trigger.StatusDisabled:
 		sb.WriteString("; switched off by the bot: " + t.LastError)
 	}
+	sb.WriteString(deliveryText(t, viewer))
 	fmt.Fprintf(&sb, "; set up by %s", t.OwnerName)
 	if t.LastResult != "" {
 		fmt.Fprintf(&sb, "; last: %s at %s", t.LastResult, formatTime(t.LastRun, loc))
@@ -295,8 +318,8 @@ func (triggerCreate) Description() string {
 		"The result tells you when it will run: pass that on to the user and check it matches what they asked."
 }
 
-func (triggerCreate) Parameters() []byte {
-	return []byte(`{"type":"object","properties":{` +
+func (c triggerCreate) Parameters() []byte {
+	return []byte(`{"type":"object","properties":{` + c.tt.ntfyParams(true) +
 		`"mode":{"type":"string","enum":["remind","task"],"description":"remind (default): remind the user of something. task: carry out an instruction, with tools such as web search, and report."},` +
 		`"text":{"type":"string","description":"For remind: what to remind the user of, with all details (names, numbers, places). For task: a complete, self-contained instruction, as the user would give it now."},` +
 		`"title":{"type":"string","description":"A short name for lists (optional)."},` +
@@ -321,6 +344,7 @@ func (c triggerCreate) Execute(ctx context.Context, cc CallContext, args []byte)
 		Mode  string `json:"mode"`
 		Text  string `json:"text"`
 		Title string `json:"title"`
+		deliveryArgs
 		schedule
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -329,9 +353,6 @@ func (c triggerCreate) Execute(ctx context.Context, cc CallContext, args []byte)
 	tt := c.tt
 	if cc.ChatID == "" || cc.Channel == "" {
 		return "", errors.New("there is no chat to send to")
-	}
-	if tt.CanSend != nil && !tt.CanSend(cc.Channel) {
-		return "", fmt.Errorf("the %s channel cannot send scheduled messages", cc.Channel)
 	}
 	mode := strings.ToLower(strings.TrimSpace(in.Mode))
 	switch mode {
@@ -358,15 +379,22 @@ func (c triggerCreate) Execute(ctx context.Context, cc CallContext, args []byte)
 	if n >= tt.maxPerChat() {
 		return "", fmt.Errorf("this chat already has %d scheduled items (the limit); delete one first", n)
 	}
-	cron, at, next, zone, err := tt.resolve(cc, mode, in.schedule, nil)
-	if err != nil {
-		return "", err
-	}
 	t := trigger.Trigger{
 		Channel: cc.Channel, ChatID: cc.ChatID, IsGroup: cc.IsGroup, OwnerID: cc.UserID, OwnerName: nameOf(cc),
 		Mode: mode, Title: clip(strings.TrimSpace(in.Title), maxTriggerTitle), Text: text,
-		Cron: cron, At: at, Zone: zone, Next: next, Status: trigger.StatusActive, Created: tt.now(),
+		Status: trigger.StatusActive, Created: tt.now(), Notify: trigger.NotifyChat,
 	}
+	if err := tt.applyDelivery(ctx, cc, &t, in.deliveryArgs, true); err != nil {
+		return "", err
+	}
+	if t.Notify != trigger.NotifyNtfy && tt.CanSend != nil && !tt.CanSend(cc.Channel) {
+		return "", fmt.Errorf("the %s channel cannot send scheduled messages", cc.Channel)
+	}
+	cron, at, next, zone, err := tt.resolve(cc, mode, t.Notify, in.schedule, nil)
+	if err != nil {
+		return "", err
+	}
+	t.Cron, t.At, t.Next, t.Zone = cron, at, next, zone
 	id, err := tt.Store.Create(ctx, t)
 	if err != nil {
 		return "", err
@@ -374,7 +402,7 @@ func (c triggerCreate) Execute(ctx context.Context, cc CallContext, args []byte)
 	t.ID = id
 	tt.logf("trigger created", cc, t)
 	tt.wake()
-	return "Scheduled: " + describe(t, tt.now(), false) + "\nTell the user, in their language, what you set and when it will happen.", nil
+	return "Scheduled: " + describe(t, tt.now(), false, cc) + tt.deliveryAdvice(t, cc) + "\nTell the user, in their language, what you set and when it will happen.", nil
 }
 
 func nameOf(cc CallContext) string {
@@ -408,7 +436,7 @@ func (l triggerList) Execute(ctx context.Context, cc CallContext, _ []byte) (str
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d scheduled item(s) in this chat (now: %s):\n", len(list), formatTime(now, l.tt.loc()))
 	for _, t := range list {
-		sb.WriteString("- " + describe(t, now, true) + "\n")
+		sb.WriteString("- " + describe(t, now, true, cc) + "\n")
 	}
 	return sb.String(), nil
 }
@@ -424,8 +452,8 @@ func (triggerUpdate) Description() string {
 		"or pause it with enabled=false and resume it with enabled=true. Give only what changes."
 }
 
-func (triggerUpdate) Parameters() []byte {
-	return []byte(`{"type":"object","properties":{` +
+func (u triggerUpdate) Parameters() []byte {
+	return []byte(`{"type":"object","properties":{` + u.tt.ntfyParams(false) +
 		`"id":{"type":"integer","description":"Number of the trigger, from trigger_list."},` +
 		`"text":{"type":"string"},"title":{"type":"string"},` +
 		`"mode":{"type":"string","enum":["remind","task"]},` +
@@ -443,6 +471,7 @@ func (u triggerUpdate) Execute(ctx context.Context, cc CallContext, args []byte)
 		Title   *string `json:"title"`
 		Mode    *string `json:"mode"`
 		Enabled *bool   `json:"enabled"`
+		deliveryArgs
 		schedule
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -482,7 +511,17 @@ func (u triggerUpdate) Execute(ctx context.Context, cc CallContext, args []byte)
 		}
 		t.Mode = m
 	}
+	oldNotify := t.Notify
+	if err := tt.applyDelivery(ctx, cc, &t, in.deliveryArgs, false); err != nil {
+		return "", err
+	}
+	if t.Notify != trigger.NotifyNtfy && tt.CanSend != nil && !tt.CanSend(cc.Channel) {
+		return "", fmt.Errorf("the %s channel cannot send scheduled messages", cc.Channel)
+	}
 	reschedule := in.given() || in.Timezone != ""
+	if t.Notify != oldNotify && t.Status == trigger.StatusActive && tt.Windows[cc.Channel] > 0 {
+		reschedule = true // the 24 hour window applies to what goes to the chat
+	}
 	if t.Status == trigger.StatusDone && in.given() {
 		t.Status = trigger.StatusActive // a new time schedules a finished trigger again
 	}
@@ -500,7 +539,7 @@ func (u triggerUpdate) Execute(ctx context.Context, cc CallContext, args []byte)
 		reschedule = true // the minimum interval depends on the mode
 	}
 	if reschedule {
-		cron, at, next, zone, err := tt.resolve(cc, t.Mode, in.schedule, &t)
+		cron, at, next, zone, err := tt.resolve(cc, t.Mode, t.Notify, in.schedule, &t)
 		if err != nil {
 			return "", err
 		}
@@ -511,7 +550,7 @@ func (u triggerUpdate) Execute(ctx context.Context, cc CallContext, args []byte)
 	}
 	tt.logf("trigger updated", cc, t)
 	tt.wake()
-	return "Updated: " + describe(t, tt.now(), false) + "\nTell the user what changed and when it will run.", nil
+	return "Updated: " + describe(t, tt.now(), false, cc) + tt.deliveryAdvice(t, cc) + "\nTell the user what changed and when it will run.", nil
 }
 
 // --- trigger_delete ---

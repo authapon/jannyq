@@ -124,7 +124,7 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--allowed-groups` | – | comma-separated **group** IDs (or `channel:id`) where *everybody* gets answers, listed in `--allowed-users` or not ([details](#who-may-use-the-bot---allowed-users---allowed-groups)) |
 | `--group-reply` | `mention` | in groups answer only when mentioned/replied to (`mention`) or always (`all`) |
 | `--intro` | `true` | the first time the bot answers in a chat, the **model** introduces itself (it reads the system prompt, so it describes the tools and skills you configured, and writes in `--lang`); the introduction is saved in the history like any reply (the answer to the same message follows as a second message, except for Telegram's automatic `/start` with `--commands=false`, which gets the introduction alone), costs one extra model call per chat, and `false` turns it off |
-| `--triggers` | `true` | let users ask the bot, in chat, for reminders and tasks at a set time or on a cron schedule; kept across restarts ([details](#reminders-and-scheduled-tasks)); `--trigger-tasks`, `--trigger-style`, `--trigger-max-per-chat`, `--trigger-min-interval`, `--trigger-grace` tune it |
+| `--triggers` | `true` | let users ask the bot, in chat, for reminders and tasks at a set time or on a cron schedule; kept across restarts ([details](#reminders-and-scheduled-tasks)); `--trigger-tasks`, `--trigger-style`, `--trigger-max-per-chat`, `--trigger-min-interval`, `--trigger-grace` tune it; `--ntfy-url` also pushes them to a phone ([ntfy](#notifications-on-the-phone-through-ntfy)) |
 | `--commands` | `true` | chat commands `/help`, `/reset`, `/compact`; `false` removes **all** slash commands: such text is just a message for the model, and the web chat hides its **New chat** button |
 | `--rate-limit` | `20` | messages per user per minute |
 | `--system-prompt[-file]` | – | extra instructions for the model |
@@ -524,6 +524,45 @@ a mistake shows. Triggers are kept in `<data-dir>/triggers.db` (included in back
   `--triggers=false` turns the whole thing off. **Take care in groups and on public bots:** anyone who may use the bot can have it write to the chat
   later, and a task costs a model call (with tools) every time it runs: keep the limits low where that matters.
 
+### Notifications on the phone through ntfy
+
+[ntfy](https://ntfy.sh) pushes a message to the phone of whoever subscribes to a *topic* in the ntfy app. With `--ntfy-url` the bot can send its
+scheduled reminders and task results there too, so they reach a person who has the chat app closed:
+
+```sh
+jannyq ... --ntfy-url https://ntfy.sh                                   # or your own server
+jannyq ... --ntfy-url https://ntfy.example.com --ntfy-token tk_xxxxxxxx --ntfy-topic-prefix jq-
+```
+
+| Flag / variable | Meaning |
+|---|---|
+| `--ntfy-url` / `JANNYQ_NTFY_URL` | the ntfy server; empty (default) = no ntfy at all. Only the operator sets it, so users cannot make the bot call other addresses |
+| `--ntfy-token` / `JANNYQ_NTFY_TOKEN` (or `_FILE`) | an access token (`tk_…`) or `user:password` the bot signs in with; with `http://` only for `localhost` |
+| `--ntfy-topic-prefix` / `JANNYQ_NTFY_TOPIC_PREFIX` | put in front of every topic users name. Give the bot a token that may write only to `prefix*` and it cannot be used on anybody else's topic |
+
+Users decide, in chat, **what** goes to ntfy and **where**; the model uses `ntfy_settings` and the extra arguments of `trigger_create` / `trigger_update`:
+
+- **Their topic** (once): *"Send my reminders to ntfy, my topic is ann-phone-x7."* is saved per person (`ntfy_settings`: show / set / clear / test), and
+  *"send me a test"* checks that it arrives. Saved only in a private chat, never shown in a group.
+- **Which reminders:** each one is delivered **in the chat** (`chat`, the default), **through ntfy** only (`ntfy`) or **both**:
+  *"Remind me at 15:00 to call Peter, on my phone only."* · *"Every morning at 7, the news, in the chat and on my phone."* A person may also
+  save a default (*"from now on send everything to both"*) and still say otherwise for one reminder.
+- **Other topics and priority:** one reminder can name **its own topic** (*"this one to work-alerts"*) and a **priority** 1–5 (*"urgent"* = 5).
+- **Change later:** *"Move reminder 3 to ntfy only"* works like any other change, and only its owner can do it.
+
+Details worth knowing:
+
+- Text sent by the model is the same as in the chat; for ntfy-only reminders it is still **kept in the conversation**, so the model knows what it said.
+- **If ntfy fails** (server down, token refused, no topic) the message goes to the chat instead, with a short note saying why, so it is not lost. When
+  both are wanted, one of them arriving is enough. The error shown never contains the token or the server's address.
+- Messenger and WhatsApp's 24-hour rule applies only to what goes to the chat: an **ntfy-only** reminder can be repeating or far ahead there.
+- In a **group**, a topic can neither be saved nor named (everyone would read it) and ntfy-only is refused (the group would not know about it);
+  `both` with the topic the person saved in private works. Other people see only "ntfy" in a list, never the topic.
+- **Topics on the public ntfy.sh are not secret**: anybody who knows the name can read it and publish to it. Use long, random names
+  (`ann-7f3k9x2q-phone`), or run your own ntfy server with access control and a token.
+- The log shows `scheduled message pushed through ntfy` with a short hash of the topic (never the topic or the token);
+  `jannyq_ntfy_total{result}` is exported. Messages over about 3.9 KB are cut; redirects from the server are refused.
+
 ## Web chat
 
 ```sh
@@ -669,6 +708,7 @@ internal/agent      conversation loop, tool execution, compaction
 internal/session    per-chat SQLite storage with an LRU of open databases
 internal/tool       web_search, web_fetch, run_command, load_skill, read/search_attachment, SSRF-safe HTTP client
 internal/trigger    scheduled reminders and tasks: cron parser, SQLite store, scheduler
+internal/ntfy       push notifications through an ntfy server
 internal/knowledge  shared knowledge base: chunking, SQLite store (FTS5 + vectors), hybrid search, folder indexer
 internal/attach     pictures (resize, EXIF), PDF text/OCR (sandbox or pure Go), text-file decoding
 internal/sandbox    command executor (limits, per-chat users), HTTP server and client

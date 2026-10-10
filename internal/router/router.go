@@ -17,6 +17,7 @@ import (
 	"github.com/authapon/jannyq/internal/agent"
 	"github.com/authapon/jannyq/internal/channel"
 	"github.com/authapon/jannyq/internal/i18n"
+	"github.com/authapon/jannyq/internal/ntfy"
 	"github.com/authapon/jannyq/internal/ratelimit"
 	"github.com/authapon/jannyq/internal/session"
 )
@@ -88,6 +89,8 @@ type Router struct {
 
 	resetWorkspace func(ctx context.Context, workspace string) error
 	notifiers      map[string]channel.Notifier
+	ntfy           *ntfy.Client
+	prefs          PrefsFunc
 	attach         *attachState
 
 	recordLimiter *ratelimit.Limiter

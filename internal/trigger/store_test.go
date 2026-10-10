@@ -2,6 +2,7 @@ package trigger
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -194,5 +195,97 @@ func TestDisableOrphansAndStats(t *testing.T) {
 	}
 	if l, _ := s.List(bg, "telegram", "99"); len(l) != 1 {
 		t.Error("the other chat lost its trigger")
+	}
+}
+
+func TestNotifyFieldsRoundTripAndPrefs(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	tr := sample(time.Now().Add(time.Hour))
+	tr.Notify, tr.NtfyTopic, tr.Priority = NotifyBoth, "work", 4
+	id, err := s.Create(ctx, tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, tr.Channel, tr.ChatID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Notify != NotifyBoth || got.NtfyTopic != "work" || got.Priority != 4 {
+		t.Fatalf("round trip: %+v", got)
+	}
+	got.Notify, got.NtfyTopic, got.Priority = NotifyNtfy, "", 0
+	if err := s.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.Get(ctx, tr.Channel, tr.ChatID, id)
+	if got.Notify != NotifyNtfy || got.NtfyTopic != "" || got.Priority != 0 {
+		t.Fatalf("after update: %+v", got)
+	}
+	// a trigger made without a way of delivery goes to the chat
+	id2, _ := s.Create(ctx, sample(time.Now().Add(time.Hour)))
+	if g, _ := s.Get(ctx, tr.Channel, tr.ChatID, id2); g.Notify != NotifyChat {
+		t.Fatalf("default notify = %q", g.Notify)
+	}
+
+	p, err := s.GetPrefs(ctx, "telegram", "42")
+	if err != nil || p.NtfyTopic != "" || p.DefaultNotify != "" {
+		t.Fatalf("no prefs yet: %+v %v", p, err)
+	}
+	if err := s.SetPrefs(ctx, Prefs{Channel: "telegram", UserID: "42", NtfyTopic: "me", DefaultNotify: NotifyBoth}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPrefs(ctx, Prefs{Channel: "telegram", UserID: "43", NtfyTopic: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := s.GetPrefs(ctx, "telegram", "42"); p.NtfyTopic != "me" || p.DefaultNotify != NotifyBoth {
+		t.Fatalf("prefs: %+v", p)
+	}
+	if p, _ := s.GetPrefs(ctx, "discord", "42"); p.NtfyTopic != "" {
+		t.Fatalf("prefs leaked across channels: %+v", p)
+	}
+	if err := s.SetPrefs(ctx, Prefs{Channel: "telegram", UserID: "42"}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := s.GetPrefs(ctx, "telegram", "42"); p.NtfyTopic != "" || p.DefaultNotify != "" {
+		t.Fatalf("prefs not cleared: %+v", p)
+	}
+	if p, _ := s.GetPrefs(ctx, "telegram", "43"); p.NtfyTopic != "other" {
+		t.Fatalf("the other user's prefs were touched: %+v", p)
+	}
+}
+
+func TestOpenUpgradesAnOldDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := `CREATE TABLE triggers (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, chat_id TEXT NOT NULL, is_group INTEGER NOT NULL DEFAULT 0,
+	owner_id TEXT NOT NULL, owner_name TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
+	cron TEXT NOT NULL DEFAULT '', at_unix INTEGER NOT NULL DEFAULT 0, zone TEXT NOT NULL DEFAULT '', next_unix INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL, created INTEGER NOT NULL, last_run INTEGER NOT NULL DEFAULT 0, last_result TEXT NOT NULL DEFAULT '',
+	last_error TEXT NOT NULL DEFAULT '', runs INTEGER NOT NULL DEFAULT 0, fails INTEGER NOT NULL DEFAULT 0);
+	INSERT INTO triggers(channel, chat_id, owner_id, mode, text, status, created) VALUES ('cli','1','u','remind','old one','active',1);`
+	if _, err := db.Exec(old); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	list, err := s.List(context.Background(), "cli", "1")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %v %v", list, err)
+	}
+	if list[0].Notify != NotifyChat || list[0].NtfyTopic != "" || list[0].Priority != 0 {
+		t.Fatalf("old trigger: %+v", list[0])
+	}
+	s.Close()
+	if s, err = Open(path); err != nil { // opening again changes nothing
+		t.Fatal(err)
 	}
 }

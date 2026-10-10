@@ -595,3 +595,37 @@ func TestEmbeddingEndpointSettings(t *testing.T) {
 		t.Errorf("an unknown provider must be refused: %v", err)
 	}
 }
+
+func TestNtfySettings(t *testing.T) {
+	model := map[string]string{"JANNYQ_LLM_MODEL": "m"}
+	c, err := load(t, nil, model)
+	if err != nil || c.NtfyURL != "" || c.NtfyToken != "" || c.NtfyTopicPrefix != "" {
+		t.Fatalf("off by default: %v %+v", err, c)
+	}
+	tokFile := filepath.Join(t.TempDir(), "ntfy.tok")
+	if err := os.WriteFile(tokFile, []byte("tk_abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_NTFY_URL": "https://ntfy.example.com/", "JANNYQ_NTFY_TOKEN_FILE": tokFile, "JANNYQ_NTFY_TOPIC_PREFIX": "jq-"}
+	c, err = load(t, nil, env)
+	if err != nil || c.NtfyURL != "https://ntfy.example.com" || c.NtfyToken != "tk_abc" || c.NtfyTopicPrefix != "jq-" {
+		t.Fatalf("env: %v %+v", err, c)
+	}
+	if _, err := load(t, []string{"--ntfy-url", "http://127.0.0.1:2586", "--ntfy-token", "tk_x"}, model); err != nil {
+		t.Errorf("a token over http to this machine is fine: %v", err)
+	}
+	for name, args := range map[string][]string{
+		"not a url":         {"--ntfy-url", "ntfy.sh"},
+		"wrong scheme":      {"--ntfy-url", "ftp://ntfy.sh"},
+		"credentials in it": {"--ntfy-url", "https://u:p@ntfy.sh"},
+		"token in clear":    {"--ntfy-url", "http://ntfy.example.com", "--ntfy-token", "tk_x"},
+		"bad prefix":        {"--ntfy-url", "https://ntfy.sh", "--ntfy-topic-prefix", "a b"},
+		"token alone":       {"--ntfy-token", "tk_x"},
+		"prefix alone":      {"--ntfy-topic-prefix", "jq-"},
+		"without triggers":  {"--ntfy-url", "https://ntfy.sh", "--triggers=false"},
+	} {
+		if _, err := load(t, args, model); err == nil || !strings.Contains(err.Error(), "--ntfy") {
+			t.Errorf("%s must be refused, err = %v", name, err)
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/authapon/jannyq/internal/agent"
 	"github.com/authapon/jannyq/internal/channel"
 	"github.com/authapon/jannyq/internal/llm"
+	"github.com/authapon/jannyq/internal/ntfy"
 	"github.com/authapon/jannyq/internal/session"
 	"github.com/authapon/jannyq/internal/trigger"
 )
@@ -25,6 +26,16 @@ const (
 // channel name; scheduled triggers are delivered through them.
 func (r *Router) SetNotifiers(n map[string]channel.Notifier) { r.notifiers = n }
 
+// PrefsFunc looks up what a user has chosen for their scheduled messages (the
+// ntfy topic they gave).
+type PrefsFunc func(ctx context.Context, channel, userID string) (trigger.Prefs, error)
+
+// SetNtfy gives the router the ntfy server that triggers may push to, and how
+// to find a user's own topic. A nil client means ntfy is not set up.
+func (r *Router) SetNtfy(c *ntfy.Client, prefs PrefsFunc) {
+	r.ntfy, r.prefs = c, prefs
+}
+
 // RunTrigger carries out a trigger that has come due: the model is asked to
 // give the reminder (or do the task) as part of the owner's chat, and what it
 // says is sent to the chat. It implements trigger.Runner (via
@@ -34,16 +45,22 @@ func (r *Router) RunTrigger(ctx context.Context, t trigger.Trigger, late time.Du
 	if !r.isAllowed(owner) {
 		return &trigger.DisableError{Reason: "the person who set it up may not use the bot any more"}
 	}
-	n, ok := r.notifiers[t.Channel]
-	if !ok {
-		return fmt.Errorf("the %s channel is not running, so it cannot send", t.Channel)
+	// The chat is where a message goes unless it is meant for ntfy only; if
+	// the channel cannot send, do not even ask the model.
+	respond := func() (channel.Responder, error) {
+		n, ok := r.notifiers[t.Channel]
+		if !ok {
+			return nil, fmt.Errorf("the %s channel is not running, so it cannot send", t.Channel)
+		}
+		return n.ResponderFor(t.ChatID, t.IsGroup)
 	}
-	resp, err := n.ResponderFor(t.ChatID, t.IsGroup)
-	if err != nil {
-		return err
+	if t.Notify != trigger.NotifyNtfy {
+		if _, err := respond(); err != nil {
+			return err
+		}
 	}
-	err = r.sessions.With(ctx, t.Channel, t.ChatID, func(s *session.Session) error {
-		return r.fire(ctx, s, t, late, resp)
+	err := r.sessions.With(ctx, t.Channel, t.ChatID, func(s *session.Session) error {
+		return r.fire(ctx, s, t, late, respond)
 	})
 	if errors.Is(err, session.ErrBusy) {
 		return &trigger.RetryError{After: busyRetry}
@@ -52,11 +69,11 @@ func (r *Router) RunTrigger(ctx context.Context, t trigger.Trigger, late time.Du
 }
 
 // fire runs inside the chat's exclusive session lock.
-func (r *Router) fire(ctx context.Context, s *session.Session, t trigger.Trigger, late time.Duration, resp channel.Responder) error {
+func (r *Router) fire(ctx context.Context, s *session.Session, t trigger.Trigger, late time.Duration, respond func() (channel.Responder, error)) error {
 	loc := t.Location()
 	now := time.Now()
 	if t.Mode == trigger.ModeRemind && r.cfg.TriggerPlain {
-		return r.sendPlain(ctx, s, t, late, resp)
+		return r.sendPlain(ctx, s, t, late, respond)
 	}
 	kind := "reminder"
 	if t.Mode == trigger.ModeTask {
@@ -114,7 +131,7 @@ func (r *Router) fire(ctx context.Context, s *session.Session, t trigger.Trigger
 			return ctx.Err()
 		}
 		r.log.Warn("the model could not give the reminder; sending it as it was written", "trigger", t.ID, "channel", t.Channel, "err", err)
-		return r.sendPlain(ctx, s, t, late, resp)
+		return r.sendPlain(ctx, s, t, late, respond)
 	}
 	if err != nil {
 		if ctx.Err() == nil {
@@ -125,12 +142,12 @@ func (r *Router) fire(ctx context.Context, s *session.Session, t trigger.Trigger
 			if rs := []rune(title); len(rs) > 60 {
 				title = string(rs[:60]) + "…"
 			}
-			_ = resp.Send(ctx, r.tr.T("trigger_task_failed", title))
+			_ = r.deliver(ctx, t, r.tr.T("trigger_task_failed", title), respond)
 		}
 		return err
 	}
-	if err := resp.Send(ctx, reply); err != nil {
-		return fmt.Errorf("could not deliver the message: %w", err)
+	if err := r.deliver(ctx, t, reply, respond); err != nil {
+		return err
 	}
 	if use, ok := r.agent.ContextUse(t.Channel + ":" + t.ChatID); ok {
 		r.log.Info("scheduled message delivered", "trigger", t.ID, "channel", t.Channel, "chat", t.ChatID, "context", use.String())
@@ -161,7 +178,7 @@ func (r *Router) askForTrigger(ctx context.Context, s *session.Session, in agent
 
 // sendPlain sends a reminder exactly as it was written, and keeps it in the
 // conversation.
-func (r *Router) sendPlain(ctx context.Context, s *session.Session, t trigger.Trigger, late time.Duration, resp channel.Responder) error {
+func (r *Router) sendPlain(ctx context.Context, s *session.Session, t trigger.Trigger, late time.Duration, respond func() (channel.Responder, error)) error {
 	text := r.tr.T("trigger_plain", t.Text)
 	if late >= lateAfter {
 		due := t.Next
@@ -171,8 +188,84 @@ func (r *Router) sendPlain(ctx context.Context, s *session.Session, t trigger.Tr
 		text = r.tr.T("trigger_plain_late", due.In(t.Location()).Format("2006-01-02 15:04"), t.Text)
 	}
 	_ = s.Append(ctx, llm.Message{Role: llm.RoleAssistant, Content: text})
-	if err := resp.Send(ctx, text); err != nil {
+	return r.deliver(ctx, t, text, respond)
+}
+
+// deliver sends what a trigger has to say the way its owner chose: in the
+// chat, through ntfy, or both. When ntfy fails the chat gets the message, with
+// a note, so that it is not lost; when both are wanted, one of them is enough.
+func (r *Router) deliver(ctx context.Context, t trigger.Trigger, text string, respond func() (channel.Responder, error)) error {
+	toChat := t.Notify != trigger.NotifyNtfy
+	pushed := false
+	note := ""
+	if t.Notify == trigger.NotifyNtfy || t.Notify == trigger.NotifyBoth {
+		err := r.pushNtfy(ctx, t, text)
+		switch {
+		case err == nil:
+			pushed = true
+		case ctx.Err() != nil:
+			return ctx.Err()
+		default:
+			note = r.tr.T("trigger_ntfy_failed", err.Error())
+			toChat = true
+			r.log.Warn("could not push the scheduled message through ntfy", "trigger", t.ID, "channel", t.Channel, "chat", t.ChatID, "err", err)
+		}
+	}
+	if !toChat {
+		return nil
+	}
+	if note != "" {
+		text += "\n\n" + note
+	}
+	resp, err := respond()
+	if err == nil {
+		err = resp.Send(ctx, text)
+	}
+	if err != nil {
+		if pushed {
+			// ntfy has it; the chat (a closed 24 h window, say) may be unreachable
+			r.log.Warn("the scheduled message reached ntfy but not the chat", "trigger", t.ID, "channel", t.Channel, "chat", t.ChatID, "err", err)
+			return nil
+		}
 		return fmt.Errorf("could not deliver the message: %w", err)
 	}
 	return nil
+}
+
+// pushNtfy sends a trigger's message to its ntfy topic: the one the trigger
+// names, or else the owner's own.
+func (r *Router) pushNtfy(ctx context.Context, t trigger.Trigger, text string) error {
+	if r.ntfy == nil {
+		return errors.New("ntfy is not set up on this bot")
+	}
+	topic := t.NtfyTopic
+	if topic == "" && r.prefs != nil {
+		p, err := r.prefs(ctx, t.Channel, t.OwnerID)
+		if err != nil {
+			return errors.New("could not look up the ntfy topic")
+		}
+		topic = p.NtfyTopic
+	}
+	if topic == "" {
+		return errors.New("no ntfy topic is set")
+	}
+	title, tag := t.Title, "alarm_clock"
+	if t.Mode == trigger.ModeTask {
+		tag = "robot"
+		if title == "" {
+			title = r.tr.T("trigger_ntfy_title_task")
+		}
+	} else if title == "" {
+		title = r.tr.T("trigger_ntfy_title_remind")
+	}
+	err := r.ntfy.Publish(ctx, ntfy.Message{Topic: topic, Title: title, Body: text, Priority: t.Priority, Tags: []string{tag}})
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	r.cfg.Metrics.Ntfy.Inc(result)
+	if err == nil {
+		r.log.Info("scheduled message pushed through ntfy", "trigger", t.ID, "channel", t.Channel, "topic", ntfy.Short(topic))
+	}
+	return err
 }
