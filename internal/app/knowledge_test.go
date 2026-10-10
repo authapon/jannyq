@@ -19,22 +19,77 @@ func TestEmbedderChoice(t *testing.T) {
 	if newEmbedder(base) != nil {
 		t.Error("no embedding model: no embedder")
 	}
-	c := *base
-	c.EmbedModel = "bge-m3"
-	o, ok := newEmbedder(&c).(*llm.Ollama)
-	if !ok || o.BaseURL != "http://llm:11434" || o.APIKey != "chatkey" {
-		t.Errorf("same provider reuses address and key: %+v", newEmbedder(&c))
+	with := func(f func(c *config.Config)) *config.Config {
+		c := *base
+		c.EmbedModel = "bge-m3"
+		f(&c)
+		return &c
 	}
-	c.EmbedBaseURL, c.EmbedAPIKey = "http://emb:1", "embkey"
-	if o, _ = newEmbedder(&c).(*llm.Ollama); o == nil || o.BaseURL != "http://emb:1" || o.APIKey != "embkey" {
+	ollama := func(c *config.Config) *llm.Ollama {
+		o, _ := newEmbedder(c).(*llm.Ollama)
+		if o == nil {
+			t.Fatalf("not an Ollama client: %+v", newEmbedder(c))
+		}
+		return o
+	}
+	openai := func(c *config.Config) *llm.OpenAI {
+		o, _ := newEmbedder(c).(*llm.OpenAI)
+		if o == nil {
+			t.Fatalf("not an OpenAI client: %+v", newEmbedder(c))
+		}
+		return o
+	}
+
+	// nothing given: the same server as the chat model, with its key
+	if o := ollama(with(func(*config.Config) {})); o.BaseURL != "http://llm:11434" || o.APIKey != "chatkey" {
+		t.Errorf("same provider reuses address and key: %+v", o)
+	}
+	// an address and a key of its own win
+	if o := ollama(with(func(c *config.Config) { c.EmbedBaseURL, c.EmbedAPIKey = "http://emb:1", "embkey" })); o.BaseURL != "http://emb:1" || o.APIKey != "embkey" {
 		t.Errorf("explicit settings win: %+v", o)
 	}
-	// another provider: the chat model's key must not be sent to it
-	c = *base
-	c.EmbedModel, c.EmbedProvider = "text-embedding-3-small", "openai"
-	oa, ok := newEmbedder(&c).(*llm.OpenAI)
-	if !ok || oa.BaseURL != "https://api.openai.com/v1" || oa.APIKey != "" {
-		t.Errorf("%+v", newEmbedder(&c))
+	// a different address without a key of its own: the chat model's key must not be sent there
+	if o := ollama(with(func(c *config.Config) { c.EmbedBaseURL = "http://emb:1" })); o.BaseURL != "http://emb:1" || o.APIKey != "" {
+		t.Errorf("the chat key was sent to another server: %+v", o)
+	}
+	// the same address written out is the same server (a trailing slash does not matter)
+	if o := ollama(with(func(c *config.Config) { c.EmbedBaseURL = "http://llm:11434/" })); o.APIKey != "chatkey" {
+		t.Errorf("the chat model's own server keeps its key: %+v", o)
+	}
+	// only a key given: the chat model's address
+	if o := ollama(with(func(c *config.Config) { c.EmbedAPIKey = "embkey" })); o.BaseURL != "http://llm:11434" || o.APIKey != "embkey" {
+		t.Errorf("%+v", o)
+	}
+	// another provider: its own default address, and the chat model's key must not be sent to it
+	if o := openai(with(func(c *config.Config) { c.EmbedModel, c.EmbedProvider = "text-embedding-3-small", "openai" })); o.BaseURL != "https://api.openai.com/v1" || o.APIKey != "" {
+		t.Errorf("%+v", o)
+	}
+	if o := openai(with(func(c *config.Config) {
+		c.EmbedProvider, c.EmbedBaseURL, c.EmbedAPIKey = "openai", "http://vllm:8000/v1", "sk-embed"
+	})); o.BaseURL != "http://vllm:8000/v1" || o.APIKey != "sk-embed" {
+		t.Errorf("%+v", o)
+	}
+	// the chat model on an OpenAI-compatible server and embeddings from Ollama: Ollama's own default address
+	chat := &config.Config{LLMProvider: "openai", LLMBaseURL: "https://api.example.com/v1", LLMAPIKey: "sk-chat", EmbedModel: "bge-m3", EmbedProvider: "ollama"}
+	if o := ollama(chat); o.BaseURL != "http://localhost:11434" || o.APIKey != "" {
+		t.Errorf("%+v", o)
+	}
+	// both on OpenAI-compatible servers, embeddings elsewhere with their own key
+	chat.EmbedProvider, chat.EmbedBaseURL, chat.EmbedAPIKey = "", "https://embed.example.com/v1", "sk-embed"
+	if o := openai(chat); o.BaseURL != "https://embed.example.com/v1" || o.APIKey != "sk-embed" {
+		t.Errorf("%+v", o)
+	}
+}
+
+func TestWithoutCredentials(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://user:secret@emb:11434/api": "http://emb:11434/api",
+		"http://emb:11434":                 "http://emb:11434",
+		"://bad":                           "://bad",
+	} {
+		if got := withoutCredentials(in); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
 	}
 }
 

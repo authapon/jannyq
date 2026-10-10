@@ -105,6 +105,7 @@ environment variables. Secrets can be read from files with a `_FILE` suffix
 | `--skills-sandbox-path` | `/skills` | where that directory is mounted inside the sandbox |
 | `--knowledge-dir` | – | folder for the shared knowledge base; enables `knowledge_search` ([details](#knowledge-base)) |
 | `--embed-model` | – | embedding model for semantic search (`bge-m3`, `nomic-embed-text`, …); empty = words only |
+| `--embed-provider` / `--embed-base-url` / `--embed-api-key` | the chat model's | where the embedding model runs when it is not the chat model's server: its API (`ollama` or `openai`), address and key (or `JANNYQ_EMBED_API_KEY_FILE`); see [below](#knowledge-base) |
 | `--metrics-listen` / `--metrics-token` | – | Prometheus metrics on their own address ([guide](docs/DEPLOYMENT.md#4-monitoring)) |
 | `--backup-dir` / `--backup-interval` / `--backup-keep` | – / `24h` / `7` | automatic backups ([guide](docs/DEPLOYMENT.md#5-backups)) |
 | `--retention-days` | `0` | delete chats idle for this many days (`0` = keep) |
@@ -396,6 +397,14 @@ Point `--knowledge-dir` at a folder and everyone who talks to the bot can ask ab
   (reciprocal rank fusion) and vector matches below `--knowledge-min-similarity` are dropped. Without an embedding model — or while
   it is unreachable — search works by words only, and the answer says so. Good choices for Ollama: `bge-m3` (multilingual, Thai included)
   or the smaller `nomic-embed-text`. Changing `--embed-model` re-embeds the stored passages without re-reading the files.
+- **Where the embedding model runs**: by default the same server as the chat model (`--llm-provider`, `--llm-base-url`, `--llm-api-key`). When
+  it is elsewhere, say so with `--embed-provider` (`ollama` or `openai`, the API it speaks), `--embed-base-url` and `--embed-api-key`
+  (`JANNYQ_EMBED_PROVIDER`, `JANNYQ_EMBED_BASE_URL`, `JANNYQ_EMBED_API_KEY[_FILE]`); each one you leave out follows the chat model, with two safeguards:
+  the chat model's **API key is never sent to another address**, so an embedding server at its own URL needs its own `--embed-api-key` (or none, if
+  it takes none), and a **different provider** gets its own default address (`https://api.openai.com/v1`, or `http://localhost:11434` for Ollama), because the
+  chat model's address speaks another API. Examples: chat on OpenAI, embeddings on a local Ollama: `--embed-provider ollama --embed-base-url http://localhost:11434`;
+  chat on Ollama, embeddings on a vLLM server: `--embed-provider openai --embed-base-url http://vllm:8000/v1 --embed-api-key sk-…`. The startup line
+  `knowledge base enabled` shows the provider and address in use (never the key).
 - **Two ways to answer: passages or whole documents** (`--knowledge-mode`, env `JANNYQ_KNOWLEDGE_MODE`):
 
   | | `passages` (default) | `whole` |

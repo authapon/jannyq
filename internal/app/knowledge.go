@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/authapon/jannyq/internal/attach"
@@ -25,29 +27,52 @@ type knowledgeBase struct {
 	store *knowledge.Store
 }
 
+// embedEndpoint works out which API, at which address and with which key the
+// embedding model is reached. Whatever is not given follows the chat model
+// (--llm-provider, --llm-base-url, --llm-api-key) when it is the same kind of
+// server; a different provider gets its own default address. The chat model's
+// key is only ever sent to the chat model's own server: an embedding endpoint
+// at another address needs its own --embed-api-key.
+func embedEndpoint(cfg *config.Config) (provider, base, key string) {
+	provider = cfg.EmbedProvider
+	if provider == "" {
+		provider = cfg.LLMProvider
+	}
+	base, key = cfg.EmbedBaseURL, cfg.EmbedAPIKey
+	sameServer := false
+	switch {
+	case base == "" && provider == cfg.LLMProvider:
+		base, sameServer = cfg.LLMBaseURL, true
+	case base == "" && provider == "openai":
+		base = "https://api.openai.com/v1"
+	case base == "":
+		base = "http://localhost:11434"
+	default:
+		sameServer = provider == cfg.LLMProvider && strings.TrimRight(base, "/") == strings.TrimRight(cfg.LLMBaseURL, "/")
+	}
+	if key == "" && sameServer {
+		key = cfg.LLMAPIKey
+	}
+	return provider, base, key
+}
+
+// withoutCredentials drops a user name and password from a URL, for the log.
+func withoutCredentials(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = nil
+	return u.String()
+}
+
 // newEmbedder builds the client for the embedding model, or returns nil when
 // no embedding model is configured (the knowledge base then searches by words).
 func newEmbedder(cfg *config.Config) llm.Embedder {
 	if cfg.EmbedModel == "" {
 		return nil
 	}
-	provider := cfg.EmbedProvider
-	if provider == "" {
-		provider = cfg.LLMProvider
-	}
-	base, key := cfg.EmbedBaseURL, cfg.EmbedAPIKey
-	if base == "" {
-		if provider == cfg.LLMProvider {
-			base = cfg.LLMBaseURL
-		} else if provider == "openai" {
-			base = "https://api.openai.com/v1"
-		} else {
-			base = "http://localhost:11434"
-		}
-	}
-	if key == "" && provider == cfg.LLMProvider {
-		key = cfg.LLMAPIKey
-	}
+	provider, base, key := embedEndpoint(cfg)
 	client := &http.Client{Timeout: 2 * time.Minute}
 	if provider == "openai" {
 		return &llm.OpenAI{BaseURL: base, APIKey: key, Client: client}
@@ -105,7 +130,12 @@ func newKnowledge(ctx context.Context, cfg *config.Config, cr *commandRunner, in
 		store.Close()
 		return nil, err
 	}
+	embedProvider, embedURL, _ := embedEndpoint(cfg)
+	if cfg.EmbedModel == "" {
+		embedProvider, embedURL = "", ""
+	}
 	log.Info("knowledge base enabled", "mode", cfg.KnowledgeMode, "dir", cfg.KnowledgeDir, "db", dbPath, "embed_model", cfg.EmbedModel,
+		"embed_provider", embedProvider, "embed_url", withoutCredentials(embedURL),
 		"semantic", kb.Embedder != nil, "ocr", langs, "interval", cfg.KnowledgeInterval)
 	if kb.Embedder == nil {
 		log.Info("no --embed-model: the knowledge base is searched by words only")

@@ -325,6 +325,13 @@ Ollama: `'{"keep_alive":"30m"}'` (`options` จะถูกรวมกับท
   `--knowledge-min-similarity` ถ้าไม่มี embedding model หรือเข้าถึงไม่ได้ในขณะนั้น จะค้นด้วยคำอย่างเดียวและบอกในคำตอบ
   Ollama แนะนำ `bge-m3` (หลายภาษา รวมไทย) หรือ `nomic-embed-text` (เล็กกว่า) การเปลี่ยน `--embed-model` จะ embed ข้อความที่เก็บไว้ใหม่
   โดยไม่ต้องอ่านไฟล์ซ้ำ
+- **โมเดล embedding รันที่ไหน**: ค่าเริ่มต้นคือเซิร์ฟเวอร์เดียวกับโมเดลแชท (`--llm-provider`, `--llm-base-url`, `--llm-api-key`) ถ้าอยู่คนละที่ให้ระบุ
+  `--embed-provider` (`ollama` หรือ `openai` คือ API ที่มันใช้), `--embed-base-url` และ `--embed-api-key` (`JANNYQ_EMBED_PROVIDER`, `JANNYQ_EMBED_BASE_URL`,
+  `JANNYQ_EMBED_API_KEY[_FILE]`) ตัวที่ไม่ระบุจะตามโมเดลแชท พร้อมมาตรการป้องกันสองข้อ: **API key ของโมเดลแชทไม่ถูกส่งไปที่อยู่อื่น** เซิร์ฟเวอร์ embedding
+  ที่ URL ต่างออกไปจึงต้องมี `--embed-api-key` ของตัวเอง (หรือไม่ใส่ถ้าไม่ต้องใช้) และ **provider คนละชนิด** จะใช้ที่อยู่เริ่มต้นของมันเอง
+  (`https://api.openai.com/v1` หรือ `http://localhost:11434` สำหรับ Ollama) เพราะที่อยู่ของโมเดลแชทใช้ API อีกแบบ ตัวอย่าง: แชทบน OpenAI แต่ embedding บน Ollama ในเครื่อง:
+  `--embed-provider ollama --embed-base-url http://localhost:11434` แชทบน Ollama แต่ embedding บน vLLM:
+  `--embed-provider openai --embed-base-url http://vllm:8000/v1 --embed-api-key sk-…` บรรทัด `knowledge base enabled` ตอนเริ่มบอทแสดง provider และที่อยู่ที่ใช้ (ไม่แสดง key)
 - **สองวิธีตอบ: ตามช่วงข้อความ (passages) หรือทั้งเอกสาร (whole)** (`--knowledge-mode`, env `JANNYQ_KNOWLEDGE_MODE`):
 
   | | `passages` (ค่าเริ่มต้น) | `whole` |

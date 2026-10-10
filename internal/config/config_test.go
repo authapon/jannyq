@@ -568,3 +568,30 @@ func TestTriggerSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddingEndpointSettings(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "embed.key")
+	if err := os.WriteFile(keyFile, []byte("sk-from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"JANNYQ_LLM_MODEL": "m", "JANNYQ_KNOWLEDGE_DIR": t.TempDir(), "JANNYQ_EMBED_MODEL": "bge-m3",
+		"JANNYQ_EMBED_PROVIDER": "openai", "JANNYQ_EMBED_BASE_URL": "http://emb:8000/v1", "JANNYQ_EMBED_API_KEY_FILE": keyFile,
+	}
+	c, err := load(t, nil, env)
+	if err != nil || c.EmbedProvider != "openai" || c.EmbedBaseURL != "http://emb:8000/v1" || c.EmbedAPIKey != "sk-from-file" {
+		t.Fatalf("env: %v %q %q %q", err, c.EmbedProvider, c.EmbedBaseURL, c.EmbedAPIKey)
+	}
+	c, err = load(t, []string{"--embed-provider", "ollama", "--embed-base-url", "http://other:11434", "--embed-api-key", "k"}, env)
+	if err != nil || c.EmbedProvider != "ollama" || c.EmbedBaseURL != "http://other:11434" || c.EmbedAPIKey != "k" {
+		t.Fatalf("flags win over the environment: %v %q %q %q", err, c.EmbedProvider, c.EmbedBaseURL, c.EmbedAPIKey)
+	}
+	// nothing given: left empty, so that the chat model's settings apply
+	c, err = load(t, nil, map[string]string{"JANNYQ_LLM_MODEL": "m", "JANNYQ_EMBED_MODEL": "bge-m3"})
+	if err != nil || c.EmbedProvider != "" || c.EmbedBaseURL != "" || c.EmbedAPIKey != "" {
+		t.Fatalf("defaults: %v %q %q %q", err, c.EmbedProvider, c.EmbedBaseURL, c.EmbedAPIKey)
+	}
+	if _, err := load(t, []string{"--embed-provider", "cohere"}, env); err == nil || !strings.Contains(err.Error(), "--embed-provider") {
+		t.Errorf("an unknown provider must be refused: %v", err)
+	}
+}
